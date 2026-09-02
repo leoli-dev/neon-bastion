@@ -82,8 +82,8 @@ describe('AI: limited hit rate', () => {
     const foe = m.units[4];
     // Pin the shooter at 15m from a live, invulnerable target in the open; pin
     // the other six units in the corners so they do not interfere. Stop once
-    // the shooter has fired a full magazine.
-    // (At the shared 1-shot/second cadence a 30-shot magazine takes ~30s,
+    // the shooter has fired 30 shots.
+    // (At the shared 1-shot/second cadence 30 shots take ~30s,
     // so the budget is ~40s of ticks.)
     for (let i = 0; i < 2400 && ai.shotIndex < 30 && m.state === 'running'; i++) {
       ai.pos = { x: 0, y: 0, z: 20 };

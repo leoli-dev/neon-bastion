@@ -14,7 +14,7 @@ import { losClear } from '../map/geometry';
 import { stepUnit } from '../map/movement';
 import { findPath, findNearestNode, type NavGraph } from '../map/navmesh';
 import { eyeOf, type FireResult } from '../combat/hitscan';
-import { perturbDirection, startReload } from '../combat/weapon';
+import { perturbDirection } from '../combat/weapon';
 import { perceive } from './aiPerception';
 
 export interface MatchContext {
@@ -194,11 +194,6 @@ function retreatMove(unit: Unit, b: AIState, threat: Unit | null, solids: readon
 
 function doShoot(unit: Unit, ctx: MatchContext, now: number, target: Unit): void {
   const b = unit.ai!;
-  if (unit.mag <= 0) {
-    startReload(unit, now);
-    return;
-  }
-  if (unit.reloading) return;
   // One shot per second, same cadence as the player: fire a single round the
   // moment the cooldown elapses while a target is still in sight. There is no
   // burst — at 1 rps a "burst" would just be a sustained 1/s fire.

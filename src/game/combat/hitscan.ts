@@ -94,7 +94,7 @@ export interface FireResult {
 }
 
 /**
- * Full fire pipeline: consume a round (if allowed), apply spread, resolve the
+ * Full fire pipeline: check the fire-rate cooldown, apply spread, resolve the
  * shot, apply damage, and award scoring. Each call = one bullet = at most one
  * score. Friendly fire is off (same-team targets are ignored).
  */

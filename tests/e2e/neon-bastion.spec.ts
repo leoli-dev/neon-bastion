@@ -35,7 +35,6 @@ type U = {
   hp: number;
   pos: { x: number; y: number; z: number };
   yaw: number;
-  mag: number;
   kills: number;
   hitScore: number;
   totalScore: number;

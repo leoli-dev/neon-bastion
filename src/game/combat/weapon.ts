@@ -1,5 +1,6 @@
-// Automatic rifle: magazine / reserve / reload / fire-rate, recoil "heat",
-// and deterministic spread.
+// Automatic rifle: fire-rate throttle, recoil "heat",
+// and deterministic spread. There are no magazines, reserve ammo or reloads —
+// the 1-shot/second fire interval is the ONLY thing limiting firing.
 //
 // Spread is fully deterministic: given the same master seed, shot index, heat
 // and horizontal speed, the exact bullet direction is reproducible (via
@@ -59,44 +60,19 @@ export function fireDirectionFor(
 // --- Weapon state transitions (operate on a Unit) -------------------------
 
 export function canFire(u: Unit, now: number): boolean {
-  return (
-    u.alive &&
-    !u.reloading &&
-    u.mag > 0 &&
-    now - u.lastShotAt >= CONFIG.fireInterval
-  );
+  return u.alive && now - u.lastShotAt >= CONFIG.fireInterval;
 }
 
 /**
- * If the unit can fire, consume a round and record the shot. Returns the
- * shot index used (for deterministic spread), or null if it could not fire.
+ * If the unit can fire, record the shot. Returns the shot index used (for
+ * deterministic spread), or null if it could not fire (dead or cooldown).
  */
 export function registerShot(u: Unit, now: number): number | null {
   if (!canFire(u, now)) return null;
-  u.mag -= 1;
   u.lastShotAt = now;
   u.shotIndex += 1;
   u.heat = Math.min(CONFIG.spreadHeatMax, u.heat + CONFIG.spreadHeatPerShot);
   return u.shotIndex;
-}
-
-/** Begin a reload (if possible). Returns true if a reload started. */
-export function startReload(u: Unit, now: number): boolean {
-  if (!u.alive || u.reloading || u.mag >= CONFIG.magSize || u.reserve <= 0) return false;
-  u.reloading = true;
-  u.reloadEndsAt = now + CONFIG.reloadTime;
-  return true;
-}
-
-/** Complete a reload once its timer has elapsed. */
-export function updateReload(u: Unit, now: number): void {
-  if (!u.reloading) return;
-  if (now < u.reloadEndsAt) return;
-  const need = CONFIG.magSize - u.mag;
-  const take = Math.min(need, u.reserve);
-  u.mag += take;
-  u.reserve -= take;
-  u.reloading = false;
 }
 
 /** Recover recoil heat when the trigger is released (called every tick). */

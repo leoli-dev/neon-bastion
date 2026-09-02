@@ -113,10 +113,6 @@ export interface Unit {
   armor: number;
   alive: boolean;
   // Weapon
-  mag: number;
-  reserve: number;
-  reloading: boolean;
-  reloadEndsAt: number; // logic time when reload finishes
   lastShotAt: number;
   shotIndex: number;
   heat: number; // 0..1 accumulated recoil/spread heat

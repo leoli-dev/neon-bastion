@@ -1,5 +1,5 @@
 // Match orchestration: owns all 8 units, the nav graph, the clock, the player
-// controller, the AI tick, reloads, spectator resolution, and win/lose checks.
+// controller, the AI tick, spectator resolution, and win/lose checks.
 // A fixed logic step is `tick(dt)` (the app loop feeds it 1/60s steps).
 
 import type { Unit, Team, MapData, Vec3, AIState } from './types';
@@ -9,7 +9,7 @@ import { buildNavGraph, type NavGraph } from './map/navmesh';
 import { stepUnit } from './map/movement';
 import { createUnit, blueName, redName } from './units/units';
 import { fireWeapon, type FireResult, eyeOf } from './combat/hitscan';
-import { startReload, updateReload, recoverHeat } from './combat/weapon';
+import { recoverHeat } from './combat/weapon';
 import { aiThink, createBrain, type MatchContext } from './ai/aiController';
 import { resolveSpectator, type SpectatorResult } from './ai/spectator';
 
@@ -21,14 +21,12 @@ export interface PlayerInput {
   sprint: boolean;
   jump: boolean;
   fire: boolean; // level signal: "trigger held" (true from mousedown to mouseup). The Match edge-triggers it (semi-auto).
-  reload: boolean; // edge-triggered (true for one tick)
 }
 
 export type MatchEvent =
   | { type: 'shot'; shooterId: number; res: FireResult }
   | { type: 'hit'; victimId: number; part: 'head' | 'body' }
   | { type: 'kill'; killerId: number; victimId: number; item: KillFeedItem }
-  | { type: 'reload'; unitId: number }
   | { type: 'end'; winner: Team };
 
 export interface KillFeedItem {
@@ -67,7 +65,7 @@ export class Match {
   private triggerLatched = false;
   playerInput: PlayerInput = {
     forward: false, back: false, left: false, right: false,
-    sprint: false, jump: false, fire: false, reload: false,
+    sprint: false, jump: false, fire: false,
   };
   onEvent?: (e: MatchEvent) => void;
 
@@ -94,7 +92,7 @@ export class Match {
     this.spectate = { mode: 'alive', targetId: null };
     this.playerInput = {
       forward: false, back: false, left: false, right: false,
-      sprint: false, jump: false, fire: false, reload: false,
+      sprint: false, jump: false, fire: false,
     };
     this.triggerLatched = false;
     this.units = [];
@@ -174,9 +172,6 @@ export class Match {
       vz = (mz / ml) * speed;
     }
     stepUnit(p, vx, vz, inp.jump, this.map, dt);
-    if (inp.reload) {
-      if (startReload(p, this.now)) this.onEvent?.({ type: 'reload', unitId: p.id });
-    }
     // Semi-auto: only a fresh press (rising edge of the held-trigger flag)
     // produces one shot intent. Holding the mouse button keeps `fire` true but
     // latched, so it never repeats; the next shot needs release + press again.
@@ -188,7 +183,6 @@ export class Match {
     } else {
       this.triggerLatched = false;
     }
-    this.playerInput.reload = false; // edge-triggered
   }
 
   /**
@@ -286,7 +280,6 @@ export class Match {
       if (u.ai) aiThink(u, ctx);
     }
     for (const u of this.units) {
-      updateReload(u, this.now);
       recoverHeat(u, dt, false);
     }
     this.updateSpectator();
@@ -336,7 +329,6 @@ export class Match {
         hp: Math.round(u.hp),
         pos: { x: u.pos.x, y: u.pos.y, z: u.pos.z },
         yaw: u.yaw,
-        mag: u.mag,
         kills: u.kills,
         hitScore: u.hitScore,
         totalScore: u.totalScore,

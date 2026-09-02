@@ -1,6 +1,6 @@
-// DOM-based HUD: crosshair + hitmarker, HP/ammo, team totals, leaderboard,
-// killfeed, spectator bar, floating damage numbers, a full debug panel, center
-// messages, and the start / pause / result screens. Everything is derived from
+// DOM-based HUD: crosshair + hitmarker, HP / next-shot-ready, team totals,
+// leaderboard, killfeed, spectator bar, floating damage numbers, a full debug
+// panel, center messages, and the start / pause / result screens. Everything is derived from
 // the live Match plus a few event calls.
 //
 // Type system (see design review): two distinct voices. NUMBERS (HP, ammo,
@@ -12,6 +12,7 @@
 import type { Match } from '../game/match';
 import type { KillFeedItem } from '../game/match';
 import type { Vec3 } from '../game/types';
+import { CONFIG } from '../game/constants';
 
 const CSS = `
 .nb-root{position:fixed;inset:0;pointer-events:none;z-index:10;user-select:none;
@@ -53,7 +54,7 @@ const CSS = `
   text-shadow:0 1px 2px #000,0 0 8px rgba(0,0,0,.7);pointer-events:none;}
 .nb-dmg.head{font-size:26px;color:var(--gold);}
 
-/* bottom: HP (left) + ammo (right) */
+/* bottom: HP (left) + next-shot-ready (right) */
 .nb-bottom{position:absolute;left:0;right:0;bottom:0;padding:18px 22px;display:flex;justify-content:space-between;align-items:flex-end;}
 .nb-hp .lbl,.nb-ammo .lbl{font-size:10px;letter-spacing:.22em;opacity:.6;text-transform:uppercase;font-weight:700;}
 .nb-hpnum{font-family:var(--data);font-variant-numeric:tabular-nums;font-size:46px;font-weight:800;line-height:.85;color:#fff;}
@@ -63,9 +64,11 @@ const CSS = `
 .nb-hpbar.low span.on{animation:nblow .9s ease-in-out infinite;}
 @keyframes nblow{0%,100%{opacity:1}50%{opacity:.3}}
 .nb-ammo{text-align:right;}
+/* next-shot-ready: the fire-rate cooldown is the only firing limit, so
+   instead of an ammo counter the corner shows the seconds until the next shot
+   (READY once the 1/s cooldown has elapsed). */
 .nb-ammoinum{font-family:var(--data);font-variant-numeric:tabular-nums;font-size:26px;font-weight:700;line-height:1;opacity:.85;}
-.nb-ammoinum .res{font-size:14px;opacity:.5;}
-.nb-reload{font-size:11px;letter-spacing:.2em;color:var(--gold);margin-top:5px;height:13px;font-weight:700;}
+.nb-ammoinum.ready{color:var(--cyan);opacity:1;text-shadow:0 0 10px rgba(24,224,255,.35);}
 
 /* team totals (top-centre) */
 .nb-team{position:absolute;top:16px;left:50%;transform:translateX(-50%);display:flex;gap:16px;align-items:center;padding:8px 18px;font-weight:800;font-size:16px;letter-spacing:.06em;}
@@ -161,8 +164,7 @@ export class HUD {
   private hpSegs: HTMLSpanElement[] = [];
   private hpNum!: HTMLDivElement;
   private hpbar!: HTMLDivElement;
-  private ammoNum!: HTMLDivElement;
-  private reloadEl!: HTMLDivElement;
+  private readyEl!: HTMLDivElement;
   private killfeed!: HTMLDivElement;
   private teamEl!: HTMLDivElement;
   private boardEl!: HTMLDivElement;
@@ -247,12 +249,9 @@ export class HUD {
     this.hpSegs = Array.from(this.hpbar.children) as HTMLSpanElement[];
     hp.appendChild(this.hpbar);
     const ammo = el('div', 'nb-ammo');
-    ammo.appendChild(el('div', 'lbl', 'Ammo'));
-    this.ammoNum = el('div', 'nb-ammoinum', '30');
-    this.ammoNum.innerHTML = '30 <span class="res">/ 90</span>';
-    ammo.appendChild(this.ammoNum);
-    this.reloadEl = el('div', 'nb-reload', '');
-    ammo.appendChild(this.reloadEl);
+    ammo.appendChild(el('div', 'lbl', 'Next shot'));
+    this.readyEl = el('div', 'nb-ammoinum ready', 'READY');
+    ammo.appendChild(this.readyEl);
     bottom.appendChild(hp);
     bottom.appendChild(ammo);
     this.root.appendChild(bottom);
@@ -339,7 +338,6 @@ export class HUD {
         '<b>Aim</b><span>Mouse</span>' +
         '<b>Shoot</b><span>Left click</span>' +
         '<b>Sprint</b><span>Shift</span>' +
-        '<b>Reload</b><span>R</span>' +
         '<b>Spectate</b><span>Q / E</span>' +
         '<b>Pause</b><span>Esc</span>';
       this.screenEl.appendChild(c);
@@ -552,8 +550,11 @@ export class HUD {
     }
     this.hpbar.classList.toggle('low', hp > 0 && frac <= 0.25);
 
-    this.ammoNum.innerHTML = `${p.mag} <span class="res">/ ${p.reserve}</span>`;
-    this.reloadEl.textContent = p.reloading ? 'RELOADING' : p.mag === 0 ? 'OUT OF AMMO' : '';
+    // Next-shot-ready: at the 1-shot/second cadence a live cooldown readout
+    // (READY / 0.4s) is more useful than an empty corner.
+    const rem = Math.max(0, CONFIG.fireInterval - (match.now - p.lastShotAt));
+    this.readyEl.textContent = rem <= 0 ? 'READY' : `${rem.toFixed(1)}s`;
+    this.readyEl.classList.toggle('ready', rem <= 0);
 
     // Spectate bar
     const mode = match.spectate.mode;

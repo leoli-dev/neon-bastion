@@ -34,10 +34,7 @@ export const CONFIG = {
   armorMax: 0,
   damageBody: 20,
   damageHead: 50,
-  magSize: 30,
-  reserveAmmo: 90,
-  fireInterval: 1.0, // seconds between shots — one shot per second, shared by player AND AI (no side has a fire-rate advantage)
-  reloadTime: 2.1,
+  fireInterval: 1.0, // seconds between shots — one shot per second, shared by player AND AI. The ONLY firing limit (no magazines, no reserve, no reload — nobody can "run dry").
   // spread (radians of cone)
   spreadBase: 0.0045,
   spreadHeatPerShot: 0.16, // heat added per shot
@@ -61,9 +58,6 @@ export const CONFIG = {
     inaccuracyBase: 0.03, // base cone
     inaccuracyDist: 0.0009, // added per meter of range
     moveInaccuracy: 0.004, // added when the AI is moving
-    aiMagSize: 30,
-    aiReloadTime: 1.8,
-    reloadWhenEmpty: true,
     retreatHp: 32, // drop to 'retreat' at or below this HP
     // behaviour timing
     decideInterval: 0.22, // how often an AI re-evaluates its state

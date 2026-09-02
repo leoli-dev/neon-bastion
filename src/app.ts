@@ -195,9 +195,6 @@ export class App {
       case 'Space':
         pi.jump = down;
         break;
-      case 'KeyR':
-        if (down) pi.reload = true;
-        break;
       case 'KeyQ':
         if (down && !this.match.player.alive) this.match.setSpectateIndex(-1);
         break;
@@ -236,11 +233,7 @@ export class App {
     // (mouseup) drops the flag so the next fresh press fires again.
     this.webglCanvas.addEventListener('mousedown', (e) => {
       if (e.button === 0 && this.started && !this.paused) {
-        const p = this.match.player;
-        if (p.alive) {
-          this.match.playerInput.fire = true;
-          if (p.mag === 0) this.audio.empty();
-        }
+        if (this.match.player.alive) this.match.playerInput.fire = true;
       }
     });
     window.addEventListener('mouseup', (e) => {
@@ -308,8 +301,6 @@ export class App {
         this.hud.flashMessage('ENEMY DOWN', '#ffd24a');
       }
       if (e.victimId === 0) this.hud.flashMessage('YOU WERE ELIMINATED', '#ff5a7a');
-    } else if (e.type === 'reload') {
-      if (e.unitId === 0) this.audio.reload();
     } else if (e.type === 'end') {
       this.onEnd(e.winner);
     }
@@ -491,7 +482,7 @@ function createNoGLFallback(container: HTMLElement): Match {
   const controls = document.createElement('div');
   controls.style.cssText = 'display:grid;grid-template-columns:auto auto;gap:6px 22px;font-size:14px;opacity:.82;text-align:left;letter-spacing:.03em;';
   controls.innerHTML =
-    '<b>Move</b><span>W A S D</span><b>Aim</b><span>Mouse</span><b>Shoot</b><span>Left click</span><b>Reload</b><span>R</span><b>Spectate</b><span>Q / E</span><b>Pause</b><span>Esc</span>';
+    '<b>Move</b><span>W A S D</span><b>Aim</b><span>Mouse</span><b>Shoot</b><span>Left click</span><b>Spectate</b><span>Q / E</span><b>Pause</b><span>Esc</span>';
   root.append(title, msg, sub, wrap, controls);
   container.appendChild(root);
 

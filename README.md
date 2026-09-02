@@ -23,10 +23,9 @@ binding, and every real binding is listed.
 |---|---|
 | `WASD` / arrows | Move |
 | Mouse | Aim (pointer-locked) |
-| Left click | Fire (full-auto pulse rifle, hold to keep firing) |
+| Left click | Fire (semi-auto, one shot per second — the fire-rate cooldown is the only limit) |
 | `Shift` | Sprint (1.56× speed, subtle FOV push + head bob) |
 | `Space` | Jump |
-| `R` | Reload |
 | `Q` / `E` | Spectate previous / next ally (after you die) |
 | `Esc` | Release the mouse / open the pause screen |
 | `F2` | Director mode (score-only overlay, hides all match chrome) |
@@ -40,10 +39,11 @@ lock, which the browser requires a user gesture for).
 
 ## What's implemented
 
-- **Gameplay** — hitscan full-auto pulse rifle (body 20 / head 50, i.e. headshot ×2.5),
-  30-round mag + 90 reserve, reload, 8 units, team-elimination win, and a results
-  screen with a per-unit board sorted by score. Full-auto is per spec (the brief
-  calls for an automatic rifle); fire rate is ~11.7 rounds/s.
+- **Gameplay** — hitscan pulse rifle (body 20 / head 50, i.e. headshot ×2.5), 8
+  units, team-elimination win, and a results screen with a per-unit board sorted
+  by score. There are no magazines, reserve ammo or reloads — the shared
+  1-shot/second fire-rate throttle is the only firing limit, so nobody can run
+  dry.
 - **Deterministic sim** — a fixed 60 Hz tick. Same seed ⇒ same input stream ⇒ same
   match. Damage and score are pure functions of the sim, so the leaderboard is exact.
 - **Navmesh AI** — a 29-node graph (A\*) with line-of-sight routing. States:
@@ -60,7 +60,7 @@ lock, which the browser requires a user gesture for).
   (unit hits AND wall hits), a live blueprint minimap (units as filled/hollow dots +
   team spawn wedges), fog, and ACES filmic tonemapping with a brightness floor
   (ambient + 6 sodium lamps) so the scene stays legible.
-- **Audio** — fully synthesized (fire, impact, headshot, reload, UI, ambient hum); no
+- **Audio** — fully synthesized (fire, impact, headshot, UI, ambient hum); no
   assets.
 - **No backend** — the whole match runs client-side; "restart" just reseeds the RNG.
 
@@ -139,7 +139,7 @@ src/
     rng.ts          deterministic seeded RNG (mulberry32) + hashing
     match.ts        Match: owns units/weapon/spectator, the fixed tick, events
     units/units.ts  unit factory + body-AABB / head-sphere hitboxes
-    combat/weapon.ts  ammo, fire intervals, reload, spread
+    combat/weapon.ts  fire-rate cooldown, spread
     combat/hitscan.ts ray vs AABB (map) + sphere (head/torso), nearest hit wins
     map/mapData.ts  procedural layout (data-driven, no image assets)
     map/geometry.ts  raycasts, ground height, walkability checks

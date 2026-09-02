@@ -105,17 +105,6 @@ export class Audio {
     this.noise(head ? 0.3 : 0.22, 0.1, 320, 0.6);
   }
 
-  reload(): void {
-    if (!this.ready || !this.enabled) return;
-    this.blip(500, 320, 0.05, 0.2, 'square');
-    setTimeout(() => this.blip(360, 520, 0.06, 0.2, 'square'), 160);
-  }
-
-  empty(): void {
-    if (!this.ready || !this.enabled) return;
-    this.blip(220, 180, 0.05, 0.18, 'square');
-  }
-
   end(won: boolean): void {
     if (!this.ready || !this.enabled) return;
     const notes = won ? [523, 659, 784, 1046] : [392, 330, 262, 196];

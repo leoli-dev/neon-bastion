@@ -134,20 +134,3 @@ describe('spread determinism and recovery', () => {
     expect(u.heat).toBe(0); // fully recovered
   });
 });
-
-describe('magazine and reload lockout', () => {
-  it('empty magazine cannot fire; reload blocks firing then refills', () => {
-    const u = blue(0, 0);
-    // drain the magazine (shots are spaced > 1s apart, the shared fire interval)
-    let shots = 0;
-    for (let i = 0; i < 40; i++) {
-      if (canFire(u, i * 1.1)) {
-        registerShot(u, i * 1.1);
-        shots++;
-      }
-    }
-    expect(u.mag).toBe(0);
-    expect(shots).toBe(30); // mag size
-    expect(canFire(u, 5)).toBe(false); // empty, no fire
-  });
-});
