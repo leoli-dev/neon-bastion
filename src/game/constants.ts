@@ -26,6 +26,8 @@ export const CONFIG = {
   sprintFov: 85, // FOV pushed to while sprinting (smoothly interpolated)
   bobAmplitude: 0.05,
   bobFrequency: 9,
+  hitKick: 0.06, // camera kick on being hit (rad, snaps up + away from the attacker, fast return)
+  shotKick: 0.02, // camera kick per shot (recoil pitch, accumulates while firing, eases back)
 
   // --- Combat / weapon ----------------------------------------------------
   hpMax: 100,

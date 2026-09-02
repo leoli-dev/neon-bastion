@@ -8,7 +8,7 @@
 // readout that must be atomic happens inside ONE page.evaluate, so the browser
 // rAF loop (which also ticks the match in real time) cannot interleave.
 //
-// Six scenarios:
+// Seven scenarios:
 //   1. boot + pointer lock + WASD/D movement + wall collision + real render
 //      (asserted in canvas PIXELS, not screenshot bytes)
 //   2. body + head hits -> HP / score / leaderboard / hitmarker, then a
@@ -18,8 +18,10 @@
 //      text asserted via computed style) -> restart resets 8 units
 //   5. seeded AI fast-forward -> match terminates, no negative HP, and the
 //      scoring invariant totalScore === hitScore + 3*kills holds for everyone
-//   6. no-WebGL fallback (?nogl=1) -> legible 2D status, no white screen/error
-// Five screenshots of the real rendered game are saved to screenshots/.
+//   6. player-taken damage -> red vignette + damage-direction arc + camera
+//      kick (the 'hit' event is consumed), firing recoil accumulates
+//   7. no-WebGL fallback (?nogl=1) -> legible 2D status, no white screen/error
+// Seven screenshots of the real rendered game are saved to screenshots/.
 // ============================================================================
 
 import { test, expect } from '@playwright/test';
@@ -61,6 +63,8 @@ type Hooks = {
   input: (key: string, down: boolean) => void;
   shoot: (dir?: { x: number; y: number; z: number }) => unknown;
   applyDamage: (victimId: number, amount: number, causeId?: number) => void;
+  simulateHitOnPlayer: (causeId: number, part?: 'head' | 'body') => void;
+  cameraKicks: () => { kickYaw: number; kickPitch: number; recoil: number; recoilCharge: number };
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   forceSpectate: () => void;
@@ -474,7 +478,100 @@ test('5: seeded AI fight terminates; no negative HP; scoring invariant holds', a
 });
 
 // ---------------------------------------------------------------------------
-test('6: no-WebGL fallback shows a legible 2D status, never a white screen', async ({ page }) => {
+test('6: player hit -> vignette + damage-direction arc + camera kick; firing -> recoil', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // --- Player is hit by unit 4: red vignette flash, damage-direction arc at
+  // the attacker's bearing, camera kick, pain sfx wiring — all from the
+  // 'hit' event alone (no HP change: this is the FEEDBACK path). The attacker
+  // is placed on the player's own right axis using the player's live yaw, so
+  // the expected arc rotation is exact regardless of spawn orientation. ---
+  const hit = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.start();
+    const p = t.state().units.find((u) => u.isPlayer)!;
+    const yaw = p.yaw;
+    const rx = -Math.cos(yaw); // screen-right in world space (CTRL-01 fix)
+    const rz = Math.sin(yaw);
+    t.teleport(4, p.pos.x + rx * 8, p.pos.z + rz * 8); // 8 m to the player's right
+    const hpBefore = p.hp;
+    const arcEl = document.querySelector('.nb-dmgdir circle') as SVGElement;
+    t.simulateHitOnPlayer(4);
+    return {
+      hpAfter: t.state().units.find((u) => u.isPlayer)!.hp,
+      hpBefore,
+      vignette: (document.querySelector('.nb-vignette') as HTMLElement).style.opacity,
+      dmgdir: (document.querySelector('.nb-dmgdir') as HTMLElement).style.opacity,
+      arcTransform: arcEl.getAttribute('transform') ?? '',
+      arcHits: Number((document.querySelector('.nb-dmgdir') as HTMLElement).getAttribute('data-hits') || '0'),
+      kicks: t.cameraKicks(),
+    };
+  });
+  expect(hit.hpAfter, 'simulateHitOnPlayer is feedback-only: no HP change').toBe(hit.hpBefore);
+  expect(hit.vignette, 'red vignette must snap to full opacity on the hit').toBe('1');
+  expect(hit.dmgdir, 'damage-direction arc must appear on the hit').toBe('1');
+  expect(hit.arcHits).toBeGreaterThanOrEqual(1);
+  // Attacker exactly to the right => bearing +90° => arc rotated from its
+  // straight-ahead (-90°) rest to 0° (3 o'clock on the ring).
+  expect(hit.arcTransform, 'arc must point at the attacker (right => rotate(0))').toMatch(/^rotate\(0\.\d{2} 75 75\)$/);
+  expect(hit.kicks.kickPitch, 'hit kick must snap the pitch up by hitKick (0.06)').toBeGreaterThanOrEqual(0.06);
+
+  // Second hit from straight ahead => arc back to 12 o'clock (rotate(-90)).
+  const hit2 = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.fastForward(0.2);
+    const p = t.state().units.find((u) => u.isPlayer)!;
+    const fx = Math.sin(p.yaw); // forward in world space
+    const fz = Math.cos(p.yaw);
+    t.teleport(5, p.pos.x + fx * 6, p.pos.z + fz * 6);
+    t.simulateHitOnPlayer(5);
+    return (document.querySelector('.nb-dmgdir circle') as SVGElement).getAttribute('transform') ?? '';
+  });
+  expect(hit2, 'attacker straight ahead => arc at 12 o\'clock (rotate(-90))').toMatch(/^rotate\(-90\.\d{2} 75 75\)$/);
+
+  // The vignette must FADE out (short flash, not a stuck overlay): poll in
+  // page until the inline opacity returns to '0' (a later AI hit could re-arm
+  // it, so "observed fading" is the assertion, not the final state).
+  const faded = await page.evaluate(
+    () =>
+      new Promise<boolean>((resolve) => {
+        const el = document.querySelector('.nb-vignette') as HTMLElement;
+        const t0 = performance.now();
+        const check = () => {
+          if (el.style.opacity === '0') return resolve(true);
+          if (performance.now() - t0 > 2000) return resolve(false);
+          setTimeout(check, 40);
+        };
+        check();
+      })
+  );
+  expect(faded, 'the vignette must fade back to transparent after the flash').toBe(true);
+
+  // --- Firing recoil: each player shot adds CONFIG.shotKick (0.02) to the
+  // synchronous recoil charge; the charge accumulates over a burst. ---
+  const recoil = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const c0 = t.cameraKicks().recoilCharge;
+    t.shoot({ x: 0, y: 0, z: -1 });
+    const c1 = t.cameraKicks().recoilCharge;
+    t.fastForward(0.15); // past fireInterval so the 2nd/3rd shots fire
+    t.shoot({ x: 0, y: 0, z: -1 });
+    t.fastForward(0.15);
+    t.shoot({ x: 0, y: 0, z: -1 });
+    const c3 = t.cameraKicks().recoilCharge;
+    return { c0, c1, c3 };
+  });
+  expect(recoil.c1 - recoil.c0, 'one shot must add exactly one shotKick of charge').toBeCloseTo(0.02, 5);
+  expect(recoil.c3 - recoil.c1, 'the burst must accumulate ~2 more shotKicks (decay aside)').toBeGreaterThanOrEqual(0.025);
+
+  await page.screenshot({ path: 'screenshots/06-damage-feedback.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+test('7: no-WebGL fallback shows a legible 2D status, never a white screen', async ({ page }) => {
   const errors = trackErrors(page);
   await page.goto('/?nogl=1');
   await page.waitForFunction(() => (window as unknown as { __teamArenaTest?: { ready: boolean } }).__teamArenaTest?.ready === true);
@@ -499,7 +596,7 @@ test('6: no-WebGL fallback shows a legible 2D status, never a white screen', asy
   expect(hook.state.blueAlive).toBeGreaterThanOrEqual(0);
   expect(hook.state.redAlive).toBeGreaterThanOrEqual(0);
 
-  await page.screenshot({ path: 'screenshots/06-fallback.png' });
+  await page.screenshot({ path: 'screenshots/07-fallback.png' });
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors in the fallback: ' + real.join(' | ')).toHaveLength(0);
 });

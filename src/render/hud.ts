@@ -35,6 +35,19 @@ const CSS = `
 .nb-hitmark i:nth-child(3){transform:translate(-5px,-5px) rotate(-45deg);}
 .nb-hitmark i:nth-child(4){transform:translate(5px,5px) rotate(-45deg);}
 
+/* damage direction: a short arc on a ring around the crosshair, rotated to
+   the bearing of the attacker relative to the player's facing (0° = straight
+   ahead, clockwise = to the right). Set synchronously on the hit event so
+   headless E2E can read it before the next rAF frame. */
+.nb-dmgdir{position:absolute;left:50%;top:50%;width:150px;height:150px;transform:translate(-50%,-50%);opacity:0;}
+.nb-dmgdir circle{fill:none;stroke:currentColor;stroke-width:5;stroke-linecap:round;
+  filter:drop-shadow(0 0 5px currentColor);}
+
+/* red screen vignette while the player is being hit: hard in, 180 ms fade out */
+.nb-vignette{position:absolute;inset:0;opacity:0;pointer-events:none;
+  background:radial-gradient(ellipse at center,rgba(255,45,70,0) 40%,rgba(255,28,55,.55) 100%);
+  transition:opacity .18s ease-out;}
+
 /* floating damage numbers */
 .nb-dmg{position:absolute;transform:translate(-50%,-100%);font-family:var(--data);font-weight:700;font-size:18px;color:#fff;
   text-shadow:0 1px 2px #000,0 0 8px rgba(0,0,0,.7);pointer-events:none;}
@@ -161,6 +174,9 @@ export class HUD {
   private hitmark!: HTMLDivElement;
   private directorEl!: HTMLDivElement;
   private dmgWrap!: HTMLDivElement;
+  private dmgdir!: HTMLDivElement;
+  private dmgArc!: SVGCircleElement;
+  private vignette!: HTMLDivElement;
   private lastBoard = '';
   private lastDebug = '';
   private boardTimer = 0;
@@ -172,6 +188,9 @@ export class HUD {
   private lastVisual = performance.now();
   private reducedMotion = false;
   private msgTimer = 0;
+  private vigTimer = 0;
+  private dmgdirAge = 1; // > max => hidden
+  private readonly dmgdirMax = 0.6;
   onPlayAgain: (() => void) | null = null;
   onOverlayClick: ((kind: ScreenKind) => void) | null = null;
 
@@ -189,6 +208,29 @@ export class HUD {
     this.hitmark = el('div', 'nb-hitmark');
     for (let i = 0; i < 4; i++) this.hitmark.appendChild(el('i'));
     this.root.appendChild(this.hitmark);
+
+    // damage direction ring: a 12% arc (~43°) on a 56px-radius circle. The
+    // circle uses pathLength=100 so dasharray is in percent; at rest the dash
+    // starts at 12 o'clock (straight ahead) via rotate(-90).
+    this.dmgdir = el('div', 'nb-dmgdir');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', '150');
+    svg.setAttribute('height', '150');
+    svg.setAttribute('viewBox', '0 0 150 150');
+    this.dmgArc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    this.dmgArc.setAttribute('cx', '75');
+    this.dmgArc.setAttribute('cy', '75');
+    this.dmgArc.setAttribute('r', '56');
+    this.dmgArc.setAttribute('pathLength', '100');
+    this.dmgArc.setAttribute('stroke-dasharray', '12 88');
+    this.dmgArc.setAttribute('transform', 'rotate(-90 75 75)');
+    svg.appendChild(this.dmgArc);
+    this.dmgdir.appendChild(svg);
+    this.root.appendChild(this.dmgdir);
+
+    // red vignette (player-taken-damage flash)
+    this.vignette = el('div', 'nb-vignette');
+    this.root.appendChild(this.vignette);
 
     // floating damage numbers layer
     this.dmgWrap = el('div', '');
@@ -408,6 +450,36 @@ export class HUD {
   }
 
   /**
+   * The PLAYER was hit (consumes the match's 'hit' event for victim 0).
+   * `bearing` is the attacker's direction relative to the player's facing in
+   * screen space (0 = straight ahead, + to the right), or null when unknown.
+   * Feedback: red vignette flash + damage-direction arc + (in the app) the
+   * pain sfx and camera kick.
+   */
+  onPlayerDamage(bearing: number | null, head: boolean): void {
+    // Red vignette: snap to full, then let the 180 ms CSS transition fade it.
+    this.vignette.style.transition = 'none';
+    this.vignette.style.opacity = '1';
+    void this.vignette.offsetWidth; // force reflow so the next transition fires
+    this.vignette.style.transition = '';
+    window.clearTimeout(this.vigTimer);
+    this.vigTimer = window.setTimeout(() => {
+      this.vignette.style.opacity = '0';
+    }, 40);
+
+    // Damage direction: rotate the arc to the attacker's bearing.
+    if (bearing != null) {
+      const deg = (bearing * 180) / Math.PI - 90;
+      // snap axis-adjacent values to zero so toFixed can't emit "-0.00"
+      this.dmgArc.setAttribute('transform', `rotate(${(Math.abs(deg) < 0.005 ? 0 : deg).toFixed(2)} 75 75)`);
+    }
+    this.dmgdir.style.color = head ? 'var(--gold)' : '#ff5a7a';
+    this.dmgdir.dataset.hits = String(Number(this.dmgdir.dataset.hits ?? '0') + 1);
+    this.dmgdir.style.opacity = '1'; // synchronous, so E2E can assert pre-rAF
+    this.dmgdirAge = 0;
+  }
+
+  /**
    * Advance the hitmarker + damage numbers. Called once per frame with a
    * world->CSS-pixel projector (from the renderer's camera).
    */
@@ -426,6 +498,14 @@ export class HUD {
       const scale = this.reducedMotion ? 1 : 0.7 + t * 0.7;
       this.hitmark.style.opacity = opacity.toFixed(3);
       this.hitmark.style.transform = `translate(-50%,-50%) scale(${scale.toFixed(3)})`;
+    }
+
+    // damage-direction arc: hold ~40%, then fade over the rest of its life.
+    if (this.dmgdirAge <= this.dmgdirMax) {
+      this.dmgdirAge += dt;
+      const td = this.dmgdirAge / this.dmgdirMax;
+      this.dmgdir.style.opacity =
+        td >= 1 ? '0' : td < 0.4 ? '1' : (1 - (td - 0.4) / 0.6).toFixed(3);
     }
 
     // damage numbers: float up 42px, fade over life, re-projected each frame.

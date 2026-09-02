@@ -92,6 +92,12 @@ export class Renderer {
   private fovCurrent = CONFIG.fovBase;
   private bobPhase = 0;
   private bobAmp = 0;
+  // Camera kick (on being hit) and firing recoil: offsets applied on top of
+  // the player's pitch/yaw, each decaying back to zero on its own.
+  private kickYaw = 0;
+  private kickPitch = 0;
+  private recoilCharge = 0; // accumulated by shots while the trigger is down
+  private recoilShown = 0;  // the eased pitch offset actually applied to the cam
 
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, map: MapData = NEON_BASTION) {
     this.map = map;
@@ -130,6 +136,34 @@ export class Renderer {
   /** Honours prefers-reduced-motion: no tracers, fewer sparks, static cameras. */
   setReducedMotion(on: boolean): void {
     this.reducedMotion = on;
+  }
+
+  /** Firing recoil: each shot adds `amount` of pitch-up. The charge persists
+   *  while firing and eases back to zero after the trigger is released.
+   *  No-op under reduced-motion (camera movement is exactly what it targets). */
+  addRecoil(amount: number): void {
+    if (this.reducedMotion) return;
+    this.recoilCharge = Math.min(this.recoilCharge + amount, 0.12);
+  }
+
+  /** Impact kick from being hit: an immediate pitch/yaw jolt that snaps back
+   *  to zero within ~150 ms. No-op under reduced-motion. */
+  applyHitKick(yawOffset: number, pitchOffset: number): void {
+    if (this.reducedMotion) return;
+    const k = Math.exp(-0.02 * 10); // keep the kick bounded across rapid hits
+    this.kickYaw = this.kickYaw * k + yawOffset;
+    this.kickPitch = this.kickPitch * k + pitchOffset;
+  }
+
+  /** Current camera kick/recoil offsets — test hooks read this to assert that
+   *  the 'hit' and player-'shot' events actually moved the camera. */
+  getCameraKicks(): { kickYaw: number; kickPitch: number; recoil: number; recoilCharge: number } {
+    return {
+      kickYaw: this.kickYaw,
+      kickPitch: this.kickPitch,
+      recoil: this.recoilShown,
+      recoilCharge: this.recoilCharge,
+    };
   }
 
   private buildLights(): void {
@@ -448,14 +482,27 @@ export class Renderer {
   }
 
   private updateCamera(match: Match, dt: number): void {
+    // Kick/recoil decay always runs (even while spectating) so a stale offset
+    // can never survive into a respawn or a chase cam.
+    if (!match.playerInput.fire) this.recoilCharge *= Math.exp(-dt * 6); // half-life ~115 ms
+    this.recoilShown += (this.recoilCharge - this.recoilShown) * Math.min(1, dt * 16);
+    const kickDecay = Math.exp(-dt * 10); // half-life ~70 ms: a fast snap-back
+    this.kickYaw *= kickDecay;
+    this.kickPitch *= kickDecay;
+
     const p = match.player;
     const mode = match.spectate.mode;
     if (mode === 'alive' && p.alive) {
       const eye = eyeOf(p);
-      const cp = Math.cos(p.pitch);
-      const fx = Math.sin(p.yaw) * cp;
-      const fy = Math.sin(p.pitch);
-      const fz = Math.cos(p.yaw) * cp;
+      // Effective view angles = the player's own aim + recoil pitch-up +
+      // impact kick (the kick is applied here, not to p.yaw/p.pitch, so the
+      // simulation state is never contaminated by a camera effect).
+      const yaw = p.yaw + this.kickYaw;
+      const pitch = Math.min(1.35, Math.max(-1.35, p.pitch + this.recoilShown + this.kickPitch));
+      const cp = Math.cos(pitch);
+      const fx = Math.sin(yaw) * cp;
+      const fy = Math.sin(pitch);
+      const fz = Math.cos(yaw) * cp;
 
       // Sprint feedback: smooth FOV push (78° -> 85°) + a subtle head bob so
       // the 1.56× speed is *felt*, not just in the sim. Disabled under

@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { Match } from './game/match';
 import type { MatchEvent } from './game/match';
+import { CONFIG } from './game/constants';
 import { Renderer } from './render/renderer';
 import { HUD } from './render/hud';
 import { Audio } from './game/audio';
@@ -24,6 +25,25 @@ const MUZZLE_DROP = 0.12;   // metres below eye level
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/**
+ * Screen-space bearing of a world point relative to the player's facing:
+ * 0 = straight ahead, positive = to the player's right (clockwise on screen).
+ * Pure (no DOM/camera state) so it is unit-testable in node.
+ */
+export function damageBearing(playerYaw: number, from: { x: number; z: number }, to: { x: number; z: number }): number | null {
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  const len = Math.hypot(dx, dz);
+  if (len < 1e-4) return null;
+  // forward = (sin yaw, cos yaw); screen-right = (-cos yaw, sin yaw) (the
+  // same handedness the strafe fix established — A/D use it too).
+  const fx = Math.sin(playerYaw);
+  const fz = Math.cos(playerYaw);
+  const rx = -Math.cos(playerYaw);
+  const rz = Math.sin(playerYaw);
+  return Math.atan2((rx * dx + rz * dz) / len, (fx * dx + fz * dz) / len);
 }
 
 export class App {
@@ -262,11 +282,20 @@ export class App {
       const eye = eyeOf(p);
       const d = muzzle.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z));
       this.audio.shot(clamp(1 - d / 45, 0.05, 1));
-      if (e.shooterId === 0 && res.kind === 'unit') {
-        this.audio.hit(e.res.part === 'head');
-        // Player feedback: hitmarker + floating damage number at the impact.
-        this.hud.onPlayerHit(e.res.part === 'head', res.point, e.res.damage);
+      if (e.shooterId === 0) {
+        // Firing recoil: each shot kicks the view up by CONFIG.shotKick;
+        // the renderer eases it back once the trigger is released.
+        this.renderer.addRecoil(CONFIG.shotKick);
+        if (res.kind === 'unit') {
+          this.audio.hit(e.res.part === 'head');
+          // Player feedback: hitmarker + floating damage number at the impact.
+          this.hud.onPlayerHit(e.res.part === 'head', res.point, e.res.damage);
+        }
       }
+    } else if (e.type === 'hit') {
+      // The player took a hit: vignette + damage-direction arc + pain sfx +
+      // camera kick. (victimId 0 = the local player.)
+      if (e.victimId === 0 && this.match.player.alive) this.onPlayerHit(e.part);
     } else if (e.type === 'kill') {
       this.hud.addKill(e.item);
       if (e.killerId === 0) {
@@ -286,6 +315,24 @@ export class App {
     this.audio.end(winner === 'blue');
     this.hud.showResults(winner, this.match.snapshot());
     if (document.pointerLockElement === this.webglCanvas) document.exitPointerLock();
+  }
+
+  /** The local player was hit (the 'hit' event with victimId 0). */
+  private onPlayerHit(part: 'head' | 'body'): void {
+    const p = this.match.player;
+    const cause = p.lastHitBy >= 0 ? this.match.units.find((u) => u.id === p.lastHitBy) : undefined;
+    const bearing = cause ? damageBearing(p.yaw, p.pos, cause.pos) : null;
+    // Pain sfx (distinct from the hitmarker sound the player makes on hits).
+    this.audio.hurt(part === 'head');
+    // Damage-direction arc around the crosshair + red vignette.
+    this.hud.onPlayerDamage(bearing, part === 'head');
+    // Camera kick: snap up by CONFIG.hitKick and away from the attacker;
+    // the renderer decays it back to zero in ~150 ms (no-op if reduced-motion).
+    const yawOff =
+      bearing == null
+        ? 0
+        : -clamp(bearing, -Math.PI / 2, Math.PI / 2) * CONFIG.hitKick * 0.5;
+    this.renderer.applyHitKick(yawOff, CONFIG.hitKick);
   }
 
   // ---- loop --------------------------------------------------------------

@@ -96,6 +96,15 @@ export class Audio {
     this.blip(990, 990, 0.12, 0.28, 'sine');
   }
 
+  /** Taking damage (the player WAS hit). A low, dull thud — deliberately
+   *  down an octave and in a different waveform family from `hit()`, the
+   *  bright square-wave hitmarker the player makes when Hitting an enemy. */
+  hurt(head: boolean): void {
+    if (!this.ready || !this.enabled) return;
+    this.blip(head ? 130 : 95, head ? 45 : 40, 0.16, head ? 0.55 : 0.42, 'sawtooth');
+    this.noise(head ? 0.3 : 0.22, 0.1, 320, 0.6);
+  }
+
   reload(): void {
     if (!this.ready || !this.enabled) return;
     this.blip(500, 320, 0.05, 0.2, 'square');
