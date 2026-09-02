@@ -230,6 +230,10 @@ export class App {
     window.addEventListener('mousemove', (e) => {
       if (document.pointerLockElement === this.webglCanvas) this.match.applyLook(e.movementX, e.movementY);
     });
+    // Semi-auto (edge-triggered): mousedown only RAISES the held-trigger flag;
+    // the Match fires a single shot on the rising edge and stays latched while
+    // the flag is true, so holding the button never auto-fires. Releasing
+    // (mouseup) drops the flag so the next fresh press fires again.
     this.webglCanvas.addEventListener('mousedown', (e) => {
       if (e.button === 0 && this.started && !this.paused) {
         const p = this.match.player;

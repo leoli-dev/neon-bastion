@@ -151,8 +151,6 @@ export interface AIState {
   lastSeenPos: { x: number; z: number } | null;
   lastSeenAt: number;
   reactUntil: number; // do not fire before this time (reaction delay)
-  burstLeft: number;
-  nextBurstAt: number;
   strafeDir: number; // -1, 0, 1
   strafeUntil: number;
   // Deterministic per-unit RNG (seeded from match seed + unit id).

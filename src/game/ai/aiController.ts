@@ -3,7 +3,9 @@
 // Perception is limited (FOV + LOS + range + hearing). The AI never fires at
 // what it cannot see, and hitscan enforces wall occlusion, so it cannot shoot
 // through walls. Accuracy is limited by an aim-inaccuracy cone; reaction is
-// gated by a delay; fire is bursty with reload gaps.
+// gated by a delay. At the shared 1-shot-per-second cadence there is no burst
+// concept: an AI with a target in sight simply fires one round whenever its
+// cooldown has elapsed ("fire when it's time").
 
 import type { Unit, Vec3, AIState, MapData, Solid } from '../types';
 import { CONFIG } from '../constants';
@@ -48,8 +50,6 @@ export function createBrain(unit: Unit, seed: number): AIState {
     lastSeenPos: null,
     lastSeenAt: -1000,
     reactUntil: 0,
-    burstLeft: 0,
-    nextBurstAt: 0,
     strafeDir: 0,
     strafeUntil: 0,
     rng: () => rng.next(),
@@ -199,10 +199,9 @@ function doShoot(unit: Unit, ctx: MatchContext, now: number, target: Unit): void
     return;
   }
   if (unit.reloading) return;
-  if (b.burstLeft <= 0) {
-    if (now < b.nextBurstAt) return;
-    b.burstLeft = CONFIG.ai.burstMin + Math.floor(b.rng() * (CONFIG.ai.burstMax - CONFIG.ai.burstMin + 1));
-  }
+  // One shot per second, same cadence as the player: fire a single round the
+  // moment the cooldown elapses while a target is still in sight. There is no
+  // burst — at 1 rps a "burst" would just be a sustained 1/s fire.
   if (now - unit.lastShotAt < CONFIG.ai.fireInterval) return;
   const eye = eyeOf(unit);
   const dx = target.pos.x - eye.x;
@@ -218,8 +217,6 @@ function doShoot(unit: Unit, ctx: MatchContext, now: number, target: Unit): void
   const az = b.rng() * Math.PI * 2;
   const aim = perturbDirection(base, cone, az);
   ctx.fire(unit, aim);
-  b.burstLeft--;
-  if (b.burstLeft <= 0) b.nextBurstAt = now + 0.5 + b.rng() * 0.6;
 }
 
 /** Advance one AI unit by one logic tick. */

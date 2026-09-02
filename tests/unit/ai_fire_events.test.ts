@@ -50,10 +50,12 @@ interface Pinned1v1 {
 }
 
 /**
- * Pin a blue AI and a red unit 28 m apart in the open, facing each other.
+ * Pin a blue AI and a red unit 10 m apart in the open, facing each other.
  * Everyone else is removed from the fight (dead units never fire) and the
  * victim's brain is dropped (test setup, not a logic change) so there is no
  * return fire and the scenario's outcome is a pure function of the seed.
+ * 10 m is a mid engagement range where, at the shared 1-shot/second cadence,
+ * a 100 HP victim reliably dies within a few seconds of the test run.
  */
 function pinned1v1(seed: number): Pinned1v1 {
   const m = new Match(seed, openMap());
@@ -68,7 +70,7 @@ function pinned1v1(seed: number): Pinned1v1 {
   m.onEvent = (e) => events.push(e);
   const run = (maxTicks: number): void => {
     for (let i = 0; i < maxTicks && foe.alive; i++) {
-      ai.pos = { x: 0, y: 0, z: 28 };
+      ai.pos = { x: 0, y: 0, z: 10 };
       ai.hp = 100;
       ai.alive = true;
       foe.pos = { x: 0, y: 0, z: 0 };
@@ -98,9 +100,10 @@ describe('AI fire goes through the unified Match event path', () => {
   });
 
   it('kill feed records the real hit part on an AI kill (headshot is not hard-coded)', () => {
-    // --- Seed 8: the killing blow is a HEADSHOT. ---
-    const head = pinned1v1(8);
-    head.run(900);
+    // --- Seed 33: the killing blow is a HEADSHOT. (Deterministic outcome at
+    // the 10 m pin; the run budget just needs to cover it comfortably.) ---
+    const head = pinned1v1(33);
+    head.run(600);
     expect(head.foe.alive, 'the AI must actually kill the pinned victim').toBe(false);
 
     const killShot = head.events.find((e): e is ShotEvent => e.type === 'shot' && e.res.killed);
@@ -128,9 +131,9 @@ describe('AI fire goes through the unified Match event path', () => {
       'an AI head hit must emit a head hit event'
     ).toBe(true);
 
-    // --- Seed 33: the killing blow is a BODY shot -> headshot must be false. ---
-    const body = pinned1v1(33);
-    body.run(1800);
+    // --- Seed 8: the killing blow is a BODY shot -> headshot must be false. ---
+    const body = pinned1v1(8);
+    body.run(900);
     expect(body.foe.alive, 'the AI must actually kill the pinned victim').toBe(false);
     const bodyKillShot = body.events.find((e): e is ShotEvent => e.type === 'shot' && e.res.killed);
     expect(bodyKillShot, 'the killing shot must be on the event bus').toBeDefined();

@@ -20,7 +20,7 @@ export interface PlayerInput {
   right: boolean;
   sprint: boolean;
   jump: boolean;
-  fire: boolean;
+  fire: boolean; // level signal: "trigger held" (true from mousedown to mouseup). The Match edge-triggers it (semi-auto).
   reload: boolean; // edge-triggered (true for one tick)
 }
 
@@ -61,6 +61,10 @@ export class Match {
   killfeed: KillFeedItem[] = [];
   spectatorIndex = 0;
   spectate: SpectatorView = { mode: 'alive', targetId: null };
+  // Semi-auto trigger latch: remembers whether `playerInput.fire` was true on
+  // the previous tick so that only the RISING edge (a fresh press) produces a
+  // shot. Holding the trigger down (fire staying true) never auto-fires.
+  private triggerLatched = false;
   playerInput: PlayerInput = {
     forward: false, back: false, left: false, right: false,
     sprint: false, jump: false, fire: false, reload: false,
@@ -92,6 +96,7 @@ export class Match {
       forward: false, back: false, left: false, right: false,
       sprint: false, jump: false, fire: false, reload: false,
     };
+    this.triggerLatched = false;
     this.units = [];
     let id = 0;
     for (let i = 0; i < 4; i++) {
@@ -172,7 +177,17 @@ export class Match {
     if (inp.reload) {
       if (startReload(p, this.now)) this.onEvent?.({ type: 'reload', unitId: p.id });
     }
-    if (inp.fire) this.firePlayerShot();
+    // Semi-auto: only a fresh press (rising edge of the held-trigger flag)
+    // produces one shot intent. Holding the mouse button keeps `fire` true but
+    // latched, so it never repeats; the next shot needs release + press again.
+    // The shot itself still goes through the shared 1-shot/second cooldown in
+    // registerShot.
+    if (inp.fire) {
+      if (!this.triggerLatched) this.firePlayerShot();
+      this.triggerLatched = true;
+    } else {
+      this.triggerLatched = false;
+    }
     this.playerInput.reload = false; // edge-triggered
   }
 

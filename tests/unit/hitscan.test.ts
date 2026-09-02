@@ -36,7 +36,7 @@ describe('hitscan: wall priority', () => {
 
     // fire toward the open enemy (x=5): no wall on that line
     const dirOpen = norm({ x: 5, y: 0, z: 10 });
-    const r2 = fireWeapon({ units, solids: [wall], shooter, aim: dirOpen, now: 0.3, seed: 2 });
+    const r2 = fireWeapon({ units, solids: [wall], shooter, aim: dirOpen, now: 1.2, seed: 2 }); // > 1s after the last shot
     expect(r2.resolution?.kind).toBe('unit');
     expect(open.hp).toBeLessThan(100);
   });
@@ -63,7 +63,7 @@ describe('hitscan: damage and head/body', () => {
     // head: aim at the head centre
     const enemy2 = red(2, 0, 10);
     const head = { x: 0, y: enemy2.pos.y + 1.6, z: 10 };
-    r = fireWeapon({ units: [shooter, enemy2], solids: EMPTY, shooter, aim: norm({ x: 0, y: head.y - (shooter.pos.y + 1.62), z: 10 }), now: 0.3, seed: 7 });
+    r = fireWeapon({ units: [shooter, enemy2], solids: EMPTY, shooter, aim: norm({ x: 0, y: head.y - (shooter.pos.y + 1.62), z: 10 }), now: 1.2, seed: 7 }); // > 1s after the last shot
     expect(r.part).toBe('head');
     expect(enemy2.hp).toBe(100 - 50);
   });
@@ -90,7 +90,7 @@ describe('scoring rules', () => {
     expect(shooter.hitScore).toBe(1);
     expect(shooter.totalScore).toBe(1);
     // fire again (different shot) — still one score per shot
-    const r2 = fireWeapon({ units: [shooter, enemy], solids: EMPTY, shooter, aim, now: 0.3, seed: 3 });
+    const r2 = fireWeapon({ units: [shooter, enemy], solids: EMPTY, shooter, aim, now: 1.2, seed: 3 }); // > 1s after the last shot
     expect(r2.points).toBe(1);
     expect(shooter.hitScore).toBe(2);
   });
@@ -138,11 +138,11 @@ describe('spread determinism and recovery', () => {
 describe('magazine and reload lockout', () => {
   it('empty magazine cannot fire; reload blocks firing then refills', () => {
     const u = blue(0, 0);
-    // drain the magazine
+    // drain the magazine (shots are spaced > 1s apart, the shared fire interval)
     let shots = 0;
     for (let i = 0; i < 40; i++) {
-      if (canFire(u, i * 0.1)) {
-        registerShot(u, i * 0.1);
+      if (canFire(u, i * 1.1)) {
+        registerShot(u, i * 1.1);
         shots++;
       }
     }

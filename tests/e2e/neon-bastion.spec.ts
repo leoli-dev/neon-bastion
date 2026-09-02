@@ -279,10 +279,15 @@ test('2: body+head hits score correctly, hitmarker fires; wall blocks shots', as
   expect(body.pScore, 'a clean hit should add 1 point').toBeGreaterThanOrEqual(1);
   expect(body.hits, 'the hitmarker should have registered a hit').toBeGreaterThanOrEqual(1);
 
-  // --- Head hit: advance the fire cooldown, re-place target, aim at the head. ---
+  // --- Head hit: advance the fire cooldown, re-place target, aim at the head.
+  // The damage delta is measured inside ONE evaluate (no logic tick can run
+  // in between), and the blue AIs are parked out of the lane first: with the
+  // shared 1-shot/second cadence the cooldown wait (1.1s) gives them time to
+  // chip down the red unit camped in the blue spawn area. ---
   const head = await page.evaluate(() => {
     const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
-    t.fastForward(0.15); // > fireInterval (0.085s) so the player may fire again
+    t.fastForward(1.1); // > fireInterval (1.0s) so the player may fire again
+    [1, 2, 3].forEach((id) => t.teleport(id, 0, -25)); // park the blue AIs far from the lane
     t.teleport(4, -3, 21);
     const st = t.state();
     const p = st.units.find((u) => u.id === 0)!;
@@ -304,12 +309,12 @@ test('2: body+head hits score correctly, hitmarker fires; wall blocks shots', as
   expect(head.fired).toBe(true);
   expect(head.part, 'aimed at the head -> headshot').toBe('head');
   expect(head.damage).toBe(50);
-  expect(head.hp4, 'headshot should remove 50 HP').toBe(head.before - 50);
+  expect(head.hp4, 'headshot should remove 50 HP (clamped at 0)').toBe(Math.max(0, head.before - 50));
 
   // --- Wall-blocked: column between the player and the target -> no damage. ---
   const blocked = await page.evaluate(() => {
     const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
-    t.fastForward(0.15);
+    t.fastForward(1.1); // shared 1-shot/second cadence
     t.teleport(0, 0, 20); // south of the central column
     t.teleport(4, 0, -20); // north of it, behind cover
     const before = t.state().units.find((u) => u.id === 4)!.hp;
@@ -555,9 +560,9 @@ test('6: player hit -> vignette + damage-direction arc + camera kick; firing -> 
     const c0 = t.cameraKicks().recoilCharge;
     t.shoot({ x: 0, y: 0, z: -1 });
     const c1 = t.cameraKicks().recoilCharge;
-    t.fastForward(0.15); // past fireInterval so the 2nd/3rd shots fire
+    t.fastForward(1.05); // past the shared 1-shot/second cooldown so the 2nd/3rd shots fire
     t.shoot({ x: 0, y: 0, z: -1 });
-    t.fastForward(0.15);
+    t.fastForward(1.05);
     t.shoot({ x: 0, y: 0, z: -1 });
     const c3 = t.cameraKicks().recoilCharge;
     return { c0, c1, c3 };

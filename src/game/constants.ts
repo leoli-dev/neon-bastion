@@ -36,7 +36,7 @@ export const CONFIG = {
   damageHead: 50,
   magSize: 30,
   reserveAmmo: 90,
-  fireInterval: 0.085, // seconds between full-auto shots (~11.7 rps)
+  fireInterval: 1.0, // seconds between shots — one shot per second, shared by player AND AI (no side has a fire-rate advantage)
   reloadTime: 2.1,
   // spread (radians of cone)
   spreadBase: 0.0045,
@@ -55,9 +55,7 @@ export const CONFIG = {
     visionDist: 38, // max direct-line sight distance
     soundDist: 26, // how far gunfire is "heard"
     reactTime: 0.26, // seconds before an AI can return fire after acquiring
-    fireInterval: 0.2, // seconds between AI shots (slower, more human)
-    burstMin: 3,
-    burstMax: 6,
+    fireInterval: 1.0, // seconds between AI shots — same 1/s cadence as the player
     accuracy: 0.62, // base hit chance on a target in sight
     accuracyCloseBonus: 0.18, // added when target is close
     inaccuracyBase: 0.03, // base cone
