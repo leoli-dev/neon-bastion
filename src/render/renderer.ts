@@ -15,6 +15,7 @@ import * as THREE from 'three';
 import type { Match } from '../game/match';
 import type { MapData, Solid, Unit, Vec3 } from '../game/types';
 import { NEON_BASTION } from '../game/map/mapData';
+import { CONFIG } from '../game/constants';
 import { eyeOf } from '../game/combat/hitscan';
 
 // Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
@@ -29,7 +30,8 @@ const ENV = {
   background: 0x05070b,
   ground: 0x0a0d13,
   boundary: 0x0e1013,
-  wall: 0x1a1d22,
+  // ART-03: raised from 0x1a1d22 (~11% lightness, unreadable in real play).
+  wall: 0x23272e,
   ramp: 0x2a2f36,
   platform: 0x333a44,
   cover: 0x3a4048,
@@ -57,6 +59,13 @@ interface Tracer {
   max: number;
 }
 
+interface Muzzle {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  life: number;
+  max: number;
+}
+
 interface Spark {
   mesh: THREE.Mesh;
   mat: THREE.MeshBasicMaterial;
@@ -72,12 +81,17 @@ export class Renderer {
   private map: MapData;
   private units: UnitVisual[] = [];
   private tracers: Tracer[] = [];
+  private muzzles: Muzzle[] = [];
   private sparks: Spark[] = [];
   private sparkGeo: THREE.BoxGeometry;
+  private muzzleGeo: THREE.SphereGeometry;
   private minimap: CanvasRenderingContext2D;
   private minimapSize: number;
   private freeCamAngle = 0;
   private reducedMotion = false;
+  private fovCurrent = CONFIG.fovBase;
+  private bobPhase = 0;
+  private bobAmp = 0;
 
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, map: MapData = NEON_BASTION) {
     this.map = map;
@@ -85,8 +99,10 @@ export class Renderer {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     // ACES filmic tonemap + sRGB output: the single biggest reason the previous
     // build read as a "flat grey dark" instead of a "layered dark".
+    // ART-03: exposure raised 1.15 -> 1.5 — the palette's lightness steps alone
+    // did not set a brightness floor, so real play was unreadably dark.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.toneMappingExposure = 1.5;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     this.scene = new THREE.Scene();
@@ -95,16 +111,18 @@ export class Renderer {
     // firefight. Push it back so depth is a subtle cue, not a blur.
     this.scene.fog = new THREE.Fog(ENV.background, 38, 95);
 
-    this.camera = new THREE.PerspectiveCamera(78, 16 / 9, 0.1, 300);
+    this.camera = new THREE.PerspectiveCamera(CONFIG.fovBase, 16 / 9, 0.1, 300);
     this.camera.position.set(0, 1.6, 27);
 
     this.minimap = minimapCanvas.getContext('2d')!;
     this.minimapSize = minimapCanvas.width;
     this.sparkGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
+    this.muzzleGeo = new THREE.SphereGeometry(0.1, 8, 8);
 
     this.buildLights();
     this.buildArena(map);
     this.buildTracerPool(40);
+    this.buildMuzzlePool(12);
     this.buildSparkPool(48);
     this.resize();
   }
@@ -118,20 +136,26 @@ export class Renderer {
     // Cool sky + WARM ground bounce. The warm floor reflection is what makes
     // concrete read as concrete instead of blue plastic.
     this.scene.add(new THREE.HemisphereLight(0x2a3550, 0x241c14, 0.75));
+    // ART-03: a guaranteed brightness floor — no purely black region anywhere
+    // in the arena, even where no sodium lamp reaches.
+    this.scene.add(new THREE.AmbientLight(0x3a4a6a, 0.25));
     const dir = new THREE.DirectionalLight(0xfff0dd, 0.6);
     dir.position.set(12, 24, 10);
     this.scene.add(dir);
 
-    // Warm sodium lamps at the two maze corners and the two wing mouths — the
-    // "clear light/dark hierarchy at the maze turns" the prompt asks for.
+    // Warm sodium lamps at the two maze corners, the two wing mouths and the
+    // two central-approach flanks — the "clear light/dark hierarchy at the
+    // maze turns" the prompt asks for. ART-03: 4 -> 6 lamps, 150 -> 220.
     const sodium: Array<[number, number]> = [
       [-10, 16],
       [10, 16],
       [23, 0],
       [-23, 0],
+      [0, 8],
+      [0, -8],
     ];
     for (const [x, z] of sodium) {
-      const l = new THREE.PointLight(0xffb45a, 150, 26, 2);
+      const l = new THREE.PointLight(0xffb45a, 220, 26, 2);
       l.position.set(x, 5.5, z);
       this.scene.add(l);
     }
@@ -246,7 +270,18 @@ export class Renderer {
       line.frustumCulled = false;
       line.visible = false;
       this.scene.add(line);
-      this.tracers.push({ line, mat, life: 0, max: 0.1 });
+      this.tracers.push({ line, mat, life: 0, max: CONFIG.tracerLife });
+    }
+  }
+
+  private buildMuzzlePool(n: number): void {
+    for (let i = 0; i < n; i++) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+      const mesh = new THREE.Mesh(this.muzzleGeo, mat);
+      mesh.visible = false;
+      mesh.scale.setScalar(0.001);
+      this.scene.add(mesh);
+      this.muzzles.push({ mesh, mat, life: 0, max: CONFIG.muzzleLife });
     }
   }
 
@@ -256,7 +291,7 @@ export class Renderer {
       const mesh = new THREE.Mesh(this.sparkGeo, mat);
       mesh.visible = false;
       this.scene.add(mesh);
-      this.sparks.push({ mesh, mat, life: 0, max: 0.25, vel: new THREE.Vector3() });
+      this.sparks.push({ mesh, mat, life: 0, max: CONFIG.sparkLife, vel: new THREE.Vector3() });
     }
   }
 
@@ -268,19 +303,47 @@ export class Renderer {
     attr.setXYZ(0, from.x, from.y, from.z);
     attr.setXYZ(1, to.x, to.y, to.z);
     attr.needsUpdate = true;
-    t.life = t.max = 0.09;
+    // FX-01: 0.09s (~5 frames) sat at the edge of perception; CONFIG.tracerLife
+    // (0.18s, ~11 frames) is the single source of truth.
+    t.life = t.max = CONFIG.tracerLife;
     t.mat.color.setHex(0xffe08a);
     t.line.visible = true;
   }
 
+  private muzzleCursor = 0;
+  /** FX-01: the muzzle flash — a short additive gold sphere at the muzzle. */
+  spawnMuzzleFlash(at: THREE.Vector3): void {
+    if (this.reducedMotion) return;
+    const m = this.muzzles[this.muzzleCursor++ % this.muzzles.length];
+    m.mesh.position.copy(at);
+    m.life = m.max = CONFIG.muzzleLife;
+    m.mesh.scale.setScalar(0.6);
+    m.mat.color.setHex(0xffd24a);
+    m.mesh.visible = true;
+  }
+
   private sparkCursor = 0;
-  spawnHitSpark(point: THREE.Vector3, head: boolean): void {
-    const n = (head ? 5 : 3) * (this.reducedMotion ? 0.5 : 1);
+  /** FX-01: impact sparks for unit hits AND wall hits (walls used to get none). */
+  spawnHitSpark(point: THREE.Vector3, kind: 'head' | 'body' | 'wall'): void {
+    if (kind === 'wall') {
+      // cool, neutral shards — distinct from the warm unit-hit feedback
+      const n = 4 * (this.reducedMotion ? 0.5 : 1);
+      for (let i = 0; i < n; i++) {
+        const s = this.sparks[this.sparkCursor++ % this.sparks.length];
+        s.mesh.position.copy(point);
+        s.mat.color.setHex(0x9fb4d8);
+        s.life = s.max = CONFIG.sparkLife;
+        s.vel.set((Math.random() - 0.5) * 5, Math.random() * 4, (Math.random() - 0.5) * 5);
+        s.mesh.visible = true;
+      }
+      return;
+    }
+    const n = (kind === 'head' ? 5 : 3) * (this.reducedMotion ? 0.5 : 1);
     for (let i = 0; i < n; i++) {
       const s = this.sparks[this.sparkCursor++ % this.sparks.length];
       s.mesh.position.copy(point);
-      s.mat.color.setHex(head ? 0xffd24a : 0xff5a5a);
-      s.life = s.max = this.reducedMotion ? 0.14 : 0.22;
+      s.mat.color.setHex(kind === 'head' ? 0xffd24a : 0xff5a5a);
+      s.life = s.max = this.reducedMotion ? CONFIG.sparkLife * 0.5 : CONFIG.sparkLife;
       s.vel.set((Math.random() - 0.5) * 6, Math.random() * 5, (Math.random() - 0.5) * 6);
       s.mesh.visible = true;
     }
@@ -332,6 +395,19 @@ export class Renderer {
         t.mat.opacity = t.life / t.max;
       }
     }
+    // Muzzle flashes: expand + fade over their short life.
+    for (const m of this.muzzles) {
+      if (m.life <= 0) continue;
+      m.life -= dt;
+      if (m.life <= 0) {
+        m.mesh.visible = false;
+        m.mat.opacity = 0;
+      } else {
+        const k = m.life / m.max; // 1 -> 0
+        m.mat.opacity = k;
+        m.mesh.scale.setScalar(0.6 + (1 - k) * 1.4);
+      }
+    }
     // Sparks
     for (const s of this.sparks) {
       if (s.life <= 0) continue;
@@ -355,6 +431,7 @@ export class Renderer {
     let parts = 0;
     let tracers = 0;
     for (const s of this.sparks) if (s.life > 0) parts++;
+    for (const m of this.muzzles) if (m.life > 0) parts++;
     for (const t of this.tracers) if (t.life > 0) tracers++;
     return { activeParticles: parts + tracers, activeTracers: tracers };
   }
@@ -375,13 +452,31 @@ export class Renderer {
     const mode = match.spectate.mode;
     if (mode === 'alive' && p.alive) {
       const eye = eyeOf(p);
-      this.camera.position.set(eye.x, eye.y, eye.z);
       const cp = Math.cos(p.pitch);
-      this.camera.lookAt(
-        eye.x + Math.sin(p.yaw) * cp,
-        eye.y + Math.sin(p.pitch),
-        eye.z + Math.cos(p.yaw) * cp
-      );
+      const fx = Math.sin(p.yaw) * cp;
+      const fy = Math.sin(p.pitch);
+      const fz = Math.cos(p.yaw) * cp;
+
+      // Sprint feedback: smooth FOV push (78° -> 85°) + a subtle head bob so
+      // the 1.56× speed is *felt*, not just in the sim. Disabled under
+      // reduced-motion (both are camera motion).
+      const sprinting = !this.reducedMotion && match.playerInput.sprint && p.grounded;
+      const fovTarget = sprinting ? CONFIG.sprintFov : CONFIG.fovBase;
+      this.fovCurrent += (fovTarget - this.fovCurrent) * Math.min(1, dt * 6);
+      if (Math.abs(this.camera.fov - this.fovCurrent) > 0.01) {
+        this.camera.fov = this.fovCurrent;
+        this.camera.updateProjectionMatrix();
+      }
+      this.bobAmp += ((sprinting ? CONFIG.bobAmplitude : 0) - this.bobAmp) * Math.min(1, dt * 8);
+      if (this.bobAmp > 1e-4) this.bobPhase += dt * CONFIG.bobFrequency;
+      const bobY = Math.sin(this.bobPhase) * this.bobAmp;
+      const bobF = Math.cos(this.bobPhase * 2) * this.bobAmp * 0.6;
+
+      const ox = eye.x + fx * bobF;
+      const oy = eye.y + bobY;
+      const oz = eye.z + fz * bobF;
+      this.camera.position.set(ox, oy, oz);
+      this.camera.lookAt(ox + fx, oy + fy, oz + fz);
     } else {
       const targetId = match.spectate.targetId;
       let focus: THREE.Vector3 | null = null;

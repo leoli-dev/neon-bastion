@@ -9,15 +9,17 @@
 // rAF loop (which also ticks the match in real time) cannot interleave.
 //
 // Six scenarios:
-//   1. boot + pointer lock + WASD movement + wall collision + real render
+//   1. boot + pointer lock + WASD/D movement + wall collision + real render
+//      (asserted in canvas PIXELS, not screenshot bytes)
 //   2. body + head hits -> HP / score / leaderboard / hitmarker, then a
 //      wall-blocked shot (no through-wall damage)
 //   3. death -> can't fire -> spectate ally -> switch -> free camera
-//   4. blue wins -> match freezes -> results board -> restart resets 8 units
+//   4. blue wins -> match freezes -> results board (readable, token-coloured
+//      text asserted via computed style) -> restart resets 8 units
 //   5. seeded AI fast-forward -> match terminates, no negative HP, and the
 //      scoring invariant totalScore === hitScore + 3*kills holds for everyone
 //   6. no-WebGL fallback (?nogl=1) -> legible 2D status, no white screen/error
-// Four screenshots of the real rendered game are saved to screenshots/.
+// Five screenshots of the real rendered game are saved to screenshots/.
 // ============================================================================
 
 import { test, expect } from '@playwright/test';
@@ -69,17 +71,47 @@ async function snap(page: import('@playwright/test').Page): Promise<Snap> {
   return page.evaluate(() => (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest.state());
 }
 
-/** Size (bytes) of a screenshot of the WebGL canvas. A real 3D scene is a large
- *  PNG (~100KB); a blank/failed GL canvas is a tiny flat PNG (~4KB). We take a few
- *  shots and return the max, because a single capture can racy-catch a cleared
- *  composited frame under headless rAF throttling. Uses the browser screenshot
- *  pipeline (CDP), not the racy in-page drawImage. */
-async function arenaRenderBytes(page: import('@playwright/test').Page): Promise<number> {
-  let best = 0;
+/** Pixel statistics of the WebGL canvas itself (not the full page — the DOM
+ *  HUD is excluded). The old "screenshot bytes > 20 KB" proxy was defeated by
+ *  the rich HUD: a page whose 3D scene is all-black still compresses large.
+ *  The renderer is built with `preserveDrawingBuffer: true`, so reading the
+ *  canvas via an in-page drawImage is reliable (no racy composited frame).
+ *  We sample a few frames (headless rAF is throttled) and keep the best. */
+interface SceneStats {
+  brightFrac: number; // fraction of pixels clearly above the near-black background
+  std: number;        // luminance standard deviation
+  maxLuma: number;
+}
+async function arenaSceneStats(page: import('@playwright/test').Page): Promise<SceneStats> {
+  let best: SceneStats = { brightFrac: 0, std: 0, maxLuma: 0 };
   for (let i = 0; i < 6; i++) {
-    const buf = await page.locator('#webgl-canvas').screenshot();
-    best = Math.max(best, buf.length);
-    if (best > 20000) break;
+    const s = await page.evaluate((): SceneStats => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = gl.width;
+      c.height = gl.height;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0);
+      const d = ctx.getImageData(0, 0, c.width, c.height).data;
+      const n = d.length / 4;
+      let bright = 0;
+      let sum = 0;
+      let sumsq = 0;
+      let maxLuma = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const luma = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        // background is 0x05070b (luma ~7); 28 is well above any tonemap drift
+        if (luma > 28) bright++;
+        sum += luma;
+        sumsq += luma * luma;
+        if (luma > maxLuma) maxLuma = luma;
+      }
+      const mean = sum / n;
+      const std = Math.sqrt(Math.max(0, sumsq / n - mean * mean));
+      return { brightFrac: bright / n, std, maxLuma };
+    });
+    if (s.brightFrac > best.brightFrac) best = s;
+    if (best.brightFrac > 0.05) break;
     await page.waitForTimeout(150);
   }
   return best;
@@ -110,6 +142,14 @@ test('1: boots, deploys (pointer lock), WASD moves, walls block, arena renders',
   // Start screen + HUD present.
   await expect(page.locator('.nb-screen')).toBeVisible();
   await expect(page.locator('.nb-title')).toHaveText('NEON BASTION');
+  // UI-02 regression: the screen must actually RESOLVE the design tokens.
+  // toHaveText/toBeVisible pass for black-on-black, so assert computed style.
+  const titleCs = await page.locator('.nb-title').evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { color: cs.color, font: cs.fontFamily };
+  });
+  expect(titleCs.color, 'start title must use its design colour, not browser-default black').toBe('rgb(232, 244, 255)');
+  expect(titleCs.font, 'the screen must inherit the .nb-root font stack, not Times').toContain('system-ui');
   await expect(page.locator('.nb-hp')).toBeVisible();
   await expect(page.locator('.nb-ammo')).toBeVisible();
   await expect(page.locator('.nb-board')).toBeVisible();
@@ -163,13 +203,33 @@ test('1: boots, deploys (pointer lock), WASD moves, walls block, arena renders',
   expect(wall.z, 'player should have moved toward the wall').toBeLessThan(20);
   expect(wall.z, 'the column must block the player (no pass-through)').toBeGreaterThan(14.5);
 
-  // Real render, not a blank/flat screen. The browser screenshot pipeline (CDP)
-  // is more reliable than an in-page drawImage of a WebGL canvas; a real 3D scene
-  // is a large PNG (~100KB) while a blank/failed GL canvas is a tiny flat PNG
-  // (~4KB). We sample a few shots (headless rAF is throttled) and take the max.
-  const bytes = await arenaRenderBytes(page);
-  console.log('ARENA SCREENSHOT BYTES', bytes);
-  expect(bytes, 'arena should render (a real 3D scene is a large PNG; a blank canvas is ~4KB)').toBeGreaterThan(20000);
+  // --- D strafes to screen-right (CTRL-01 regression). Spawn yaw is π
+  // (facing -Z/north), so screen-right is +X: holding D must increase x.
+  const strafe = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(0, -3, 24);
+    const x0 = t.state().units[0].pos.x;
+    t.input('KeyD', true);
+    t.fastForward(0.6);
+    t.input('KeyD', false);
+    return { x0, x1: t.state().units[0].pos.x };
+  });
+  expect(strafe.x1, 'holding D (facing north) should strafe right (+X)').toBeGreaterThan(strafe.x0 + 1);
+
+  // Real render, not a blank/flat screen — measured in PIXELS of the WebGL
+  // canvas (the HUD is DOM, so it cannot inflate this number). First move the
+  // player to (5, 16), a position with a clear sight line onto the central
+  // platform (the south column at (0,13) would otherwise block the view from
+  // (0,20)), so the screenshot shows the opening central zone.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(0, 5, 16); // facing north (spawn yaw) = straight at the platform
+  });
+  await page.waitForTimeout(200); // let a few rendered frames present
+  const stats = await arenaSceneStats(page);
+  console.log('ARENA SCENE PIXELS', JSON.stringify(stats));
+  expect(stats.brightFrac, 'the 3D scene must contain visible geometry (a flat black canvas is ~0)').toBeGreaterThan(0.05);
+  expect(stats.maxLuma, 'the scene must contain pixels far brighter than the near-black background').toBeGreaterThan(60);
 
   await page.screenshot({ path: 'screenshots/01-arena.png' });
 
@@ -343,6 +403,16 @@ test('4: blue wins -> match freezes -> results board -> restart resets 8 units',
   // Results screen + full board; the match-chrome must not bleed through.
   await expect(page.locator('.nb-res-title')).toBeVisible();
   await expect(page.locator('.nb-res-title')).toHaveText('BLUE WINS');
+  // UI-02 regression: the title's inline `var(--cyan)` must RESOLVE. When the
+  // screen was outside .nb-root the variable was out of scope and the title
+  // rendered as black Times on a near-black background — invisible, while
+  // toHaveText still passed. Assert what is actually painted.
+  const resCs = await page.locator('.nb-res-title').evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { color: cs.color, font: cs.fontFamily };
+  });
+  expect(resCs.color, 'results title must resolve --cyan, not fall back to black').toBe('rgb(24, 224, 255)');
+  expect(resCs.font, 'results screen must use the .nb-root font stack, not Times').toContain('system-ui');
   await expect(page.locator('.nb-board-lg .nb-row')).toHaveCount(8);
   await expect(page.locator('.nb-root')).toHaveClass(/nb-results/);
   await expect(page.locator('.nb-msg')).toBeHidden(); // the ENEMY DOWN flash is gone

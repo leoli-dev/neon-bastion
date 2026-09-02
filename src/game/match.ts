@@ -149,8 +149,11 @@ export class Match {
     const speed = inp.sprint ? CONFIG.sprintSpeed : CONFIG.walkSpeed;
     const fx = Math.sin(p.yaw);
     const fz = Math.cos(p.yaw);
-    const rx = Math.cos(p.yaw);
-    const rz = -Math.sin(p.yaw);
+    // Screen-right is f × up. With forward = (sin θ, cos θ) in a Y-up
+    // right-handed system that is (-cos θ, sin θ). The old (cos θ, -sin θ)
+    // was its negation, so A strafed right and D strafed left (CTRL-01).
+    const rx = -Math.cos(p.yaw);
+    const rz = Math.sin(p.yaw);
     let mx = 0;
     let mz = 0;
     if (inp.forward) { mx += fx; mz += fz; }

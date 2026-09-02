@@ -22,10 +22,10 @@ export const CONFIG = {
   aiStrafeSpeed: 3.2,
   accel: 40, // velocity change toward target (units/s^2) for smoothness
   // Camera
+  fovBase: 78, // resting field of view (degrees)
+  sprintFov: 85, // FOV pushed to while sprinting (smoothly interpolated)
   bobAmplitude: 0.05,
   bobFrequency: 9,
-  hitKick: 0.06, // camera kick on being hit
-  shotKick: 0.02, // camera kick per shot (recoil pitch)
 
   // --- Combat / weapon ----------------------------------------------------
   hpMax: 100,
@@ -80,11 +80,10 @@ export const CONFIG = {
   spectateSmooth: 6, // camera lerp factor
   freeCamHeight: 26, // top-down fallback camera height
 
-  // --- Particles ----------------------------------------------------------
-  maxParticles: 900,
-  tracerLife: 0.08,
-  sparkLife: 0.3,
-  muzzleLife: 0.05,
+  // --- Particles (all consumed by the renderer's effect pools) -------------
+  tracerLife: 0.18, // ~11 frames at 60fps — long enough to be perceived
+  sparkLife: 0.22,
+  muzzleLife: 0.05, // a flash is a flash: a few frames
 };
 
 export type Config = typeof CONFIG;

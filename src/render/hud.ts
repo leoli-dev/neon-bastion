@@ -112,7 +112,7 @@ const CSS = `
 /* director mode (F2): everything hidden but a minimal win/lose line */
 .nb-director{position:absolute;top:14px;left:50%;transform:translateX(-50%);padding:9px 22px;font-size:13px;letter-spacing:.18em;text-transform:uppercase;font-weight:800;display:none;gap:18px;align-items:center;}
 .nb-director .b{color:var(--cyan)}.nb-director .r{color:var(--red)}.nb-director .vs{opacity:.4;font-size:11px}.nb-director .tg{opacity:.4;font-size:10px;}
-.nb-root.nb-director > *:not(.nb-director){display:none !important;}
+.nb-root.nb-director > *:not(.nb-director):not(.nb-screen){display:none !important;}
 body.nb-in-director .nb-minimap{display:none;}
 
 /* match chrome must not bleed into the results screen (fixes the overlap bug) */
@@ -242,12 +242,17 @@ export class HUD {
     this.directorEl = el('div', 'nb-director nb-panel');
     this.root.appendChild(this.directorEl);
 
+    // IMPORTANT: the screen MUST be a child of `.nb-root` (not `container`).
+    // All design tokens (--cyan/--red/--gold/--ink/--data, color, font-family)
+    // are defined on `.nb-root`; a screen attached to `container` is a sibling
+    // and resolves none of them, so the start/pause/results text rendered as
+    // pure black browser-default Times on a near-black background (UI-02).
     this.screenEl = el('div', 'nb-screen');
     this.screenEl.style.display = 'none';
     this.screenEl.addEventListener('click', () => {
       if (this.screenKind === 'start' || this.screenKind === 'pause') this.onOverlayClick?.(this.screenKind);
     });
-    container.appendChild(this.screenEl);
+    this.root.appendChild(this.screenEl);
   }
 
   /** Set by the app: true when prefers-reduced-motion is active. */

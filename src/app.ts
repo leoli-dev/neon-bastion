@@ -15,6 +15,13 @@ import { createTestHooks } from './testHooks';
 const TICK = 1 / 60;
 const DEFAULT_SEED = 20260212;
 
+// FX-01: tracers/flash start at the MUZZLE, not the shooter's eye. A line
+// starting at the FPV camera origin projects to a single screen-centre point
+// and can never be seen by its own shooter; offsetting it forward (and slightly
+// below eye level, like a held rifle) makes the player's own fire visible.
+const MUZZLE_OFFSET = 0.55; // metres along the shot direction
+const MUZZLE_DROP = 0.12;   // metres below eye level
+
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -238,13 +245,22 @@ export class App {
       const res = e.res.resolution;
       if (!shooter || !res) return;
       const from = eyeOf(shooter);
-      const fromV = new THREE.Vector3(from.x, from.y, from.z);
+      const dir = e.res.aim ?? { x: Math.sin(shooter.yaw), y: 0, z: Math.cos(shooter.yaw) };
+      const muzzle = new THREE.Vector3(
+        from.x + dir.x * MUZZLE_OFFSET,
+        from.y - MUZZLE_DROP + dir.y * MUZZLE_OFFSET,
+        from.z + dir.z * MUZZLE_OFFSET
+      );
       const to = res.point;
       const toV = new THREE.Vector3(to.x, to.y, to.z);
-      this.renderer.spawnTracer(fromV, toV);
-      if (res.kind === 'unit') this.renderer.spawnHitSpark(toV, e.res.part === 'head');
+      // FX-01: tracer from the muzzle; muzzle flash; sparks for wall hits too
+      // (previously only unit hits produced feedback).
+      this.renderer.spawnTracer(muzzle, toV);
+      this.renderer.spawnMuzzleFlash(muzzle);
+      if (res.kind === 'unit') this.renderer.spawnHitSpark(toV, e.res.part === 'head' ? 'head' : 'body');
+      else if (res.kind === 'wall') this.renderer.spawnHitSpark(toV, 'wall');
       const eye = eyeOf(p);
-      const d = fromV.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z));
+      const d = muzzle.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z));
       this.audio.shot(clamp(1 - d / 45, 0.05, 1));
       if (e.shooterId === 0 && res.kind === 'unit') {
         this.audio.hit(e.res.part === 'head');
