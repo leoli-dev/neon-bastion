@@ -121,6 +121,7 @@ export class Match {
       now: this.now,
       dt: CONFIG.tickDt,
       seed: this.seed,
+      fire: (shooter, aim) => this.fireFrom(shooter, aim),
     };
   }
 
@@ -175,13 +176,24 @@ export class Match {
     this.playerInput.reload = false; // edge-triggered
   }
 
+  /**
+   * The single fire pipeline shared by player AND AI shooters: resolve the
+   * shot, then broadcast it on the Match event bus (shot/hit/kill). Every
+   * bullet in the match goes through here, so audio, tracers, sparks and the
+   * kill feed behave identically regardless of who is shooting.
+   */
+  private fireFrom(shooter: Unit, aim: Vec3): FireResult {
+    const res = fireWeapon({ units: this.units, solids: this.solids, shooter, aim, now: this.now, seed: this.seed });
+    if (res.fired) this.emitShot(shooter, res);
+    return res;
+  }
+
   /** Fire a single shot for the player (also used by the test hook). */
   firePlayerShot(aim?: Vec3): FireResult | null {
     const p = this.player;
     if (!p.alive) return null;
     const a = aim ?? this.playerAim(p);
-    const res = fireWeapon({ units: this.units, solids: this.solids, shooter: p, aim: a, now: this.now, seed: this.seed });
-    if (res.fired) this.emitShot(p, res);
+    const res = this.fireFrom(p, a);
     return res.fired ? res : null;
   }
 

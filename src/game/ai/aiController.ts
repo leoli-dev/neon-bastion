@@ -11,7 +11,7 @@ import { RNG, hashSeed } from '../rng';
 import { losClear } from '../map/geometry';
 import { stepUnit } from '../map/movement';
 import { findPath, findNearestNode, type NavGraph } from '../map/navmesh';
-import { eyeOf, fireWeapon } from '../combat/hitscan';
+import { eyeOf, type FireResult } from '../combat/hitscan';
 import { perturbDirection, startReload } from '../combat/weapon';
 import { perceive } from './aiPerception';
 
@@ -23,6 +23,13 @@ export interface MatchContext {
   now: number;
   dt: number;
   seed: number;
+  /**
+   * The ONLY way an AI unit fires. Provided by Match so that AI shots travel
+   * the exact same path as player shots (fireWeapon + the Match event bus):
+   * tracers, muzzle flash, sparks, gun audio, hit/kill events and the kill
+   * feed all work identically for AI and player shooters.
+   */
+  fire: (shooter: Unit, aim: Vec3) => FireResult;
 }
 
 function norm(v: Vec3): Vec3 {
@@ -210,7 +217,7 @@ function doShoot(unit: Unit, ctx: MatchContext, now: number, target: Unit): void
     (speed > 1 ? CONFIG.ai.moveInaccuracy : 0);
   const az = b.rng() * Math.PI * 2;
   const aim = perturbDirection(base, cone, az);
-  fireWeapon({ units: ctx.units, solids: ctx.solids, shooter: unit, aim, now, seed: ctx.seed });
+  ctx.fire(unit, aim);
   b.burstLeft--;
   if (b.burstLeft <= 0) b.nextBurstAt = now + 0.5 + b.rng() * 0.6;
 }
