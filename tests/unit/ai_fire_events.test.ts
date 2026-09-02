@@ -1,14 +1,17 @@
 // Regression tests: AI shots must travel the SAME unified path as player
-// shots — Match.fireFrom -> fireWeapon + Match.emitShot — so the event bus
-// (shot/hit/kill) and the kill feed see every AI bullet exactly like a
-// player's. Before the fix, aiController.ts called fireWeapon directly and
-// 7 of the 8 shooters were audio/visual silent: no tracers, no muzzle flash,
-// no sparks, no gun audio, no hit/kill events, and degraded kill-feed entries
+// shots — Match.fireFrom -> fireWeapon (spawn bullet) + BulletSystem.step ->
+// applyImpact + Match.onBulletImpact — so the event bus (shot/impact/hit/
+// kill) and the kill feed see every AI bullet exactly like a player's.
+// Before the fix, aiController.ts called fireWeapon directly and
+// 7 of the 8 shooters were audio/visual silent: no muzzle flash,
+// no gun audio, no hit/kill events, and degraded kill-feed entries
 // (headshot hard-coded false, killer '???').
 //
-// The scenarios pin a 1v1 at fixed range with a fixed seed, so the outcome
-// (including which part the killing shot hits) is fully deterministic — the
-// same guarantees the rest of this suite relies on.
+// Bullets are ballistic: the 'shot' event fires at fire time and the
+// 'impact' event fires at arrival carrying the resolution. The scenarios
+// pin a 1v1 at fixed range with a fixed seed, so the outcome (including
+// which part the killing shot hits) is fully deterministic — the same
+// guarantees the rest of this suite relies on.
 
 import { describe, it, expect } from 'vitest';
 import { Match, type MatchEvent } from '@/game/match';
@@ -81,6 +84,7 @@ function pinned1v1(seed: number): Pinned1v1 {
 }
 
 type ShotEvent = Extract<MatchEvent, { type: 'shot' }>;
+type ImpactEvent = Extract<MatchEvent, { type: 'impact' }>;
 type KillEvent = Extract<MatchEvent, { type: 'kill' }>;
 
 describe('AI fire goes through the unified Match event path', () => {
@@ -93,10 +97,22 @@ describe('AI fire goes through the unified Match event path', () => {
     for (const e of aiShots) {
       expect(e.res.fired).toBe(true);
       expect(e.res.aim, 'the shot must carry its actual direction').not.toBeNull();
-      expect(e.res.resolution, 'the shot must carry its resolution').not.toBeNull();
     }
     // One bus event per bullet consumed — nothing silent, nothing doubled.
     expect(ai.shotIndex, 'every AI shot must appear on the bus').toBe(aiShots.length);
+
+    // Every bullet also ARRIVES with an 'impact' event carrying the
+    // resolution (the in-flight 'shot' event has resolution null by design).
+    // At most ONE bullet may still be airborne when the run ends: the victim
+    // dies on an arrival, the match freezes, and any bullet fired in the last
+    // flight window stays in flight (at 1 shot/s and ≤0.5 s flight, at most
+    // one bullet is ever airborne).
+    const aiImpacts = events.filter((e): e is ImpactEvent => e.type === 'impact' && e.shooterId === ai.id);
+    expect(aiImpacts.length, 'every AI bullet must settle with an impact event').toBeGreaterThanOrEqual(ai.shotIndex - 1);
+    expect(aiImpacts.length).toBeLessThanOrEqual(ai.shotIndex);
+    for (const e of aiImpacts) {
+      expect(e.res.resolution, 'the impact must carry its resolution').not.toBeNull();
+    }
   });
 
   it('kill feed records the real hit part on an AI kill (headshot is not hard-coded)', () => {
@@ -106,8 +122,8 @@ describe('AI fire goes through the unified Match event path', () => {
     head.run(600);
     expect(head.foe.alive, 'the AI must actually kill the pinned victim').toBe(false);
 
-    const killShot = head.events.find((e): e is ShotEvent => e.type === 'shot' && e.res.killed);
-    expect(killShot, 'the killing shot must be on the event bus').toBeDefined();
+    const killShot = head.events.find((e): e is ImpactEvent => e.type === 'impact' && e.shooterId === 1 && e.res.killed);
+    expect(killShot, 'the killing impact must be on the event bus').toBeDefined();
     expect(killShot!.shooterId).toBe(1);
     expect(killShot!.res.targetId).toBe(4);
     expect(killShot!.res.part).toBe('head');
@@ -135,7 +151,7 @@ describe('AI fire goes through the unified Match event path', () => {
     const body = pinned1v1(8);
     body.run(900);
     expect(body.foe.alive, 'the AI must actually kill the pinned victim').toBe(false);
-    const bodyKillShot = body.events.find((e): e is ShotEvent => e.type === 'shot' && e.res.killed);
+    const bodyKillShot = body.events.find((e): e is ImpactEvent => e.type === 'impact' && e.res.killed);
     expect(bodyKillShot, 'the killing shot must be on the event bus').toBeDefined();
     expect(bodyKillShot!.res.part).toBe('body');
     const bodyItem = body.match.killfeed.find((k) => k.victim === 'Raxx');

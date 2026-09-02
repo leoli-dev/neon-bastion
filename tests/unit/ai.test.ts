@@ -90,6 +90,8 @@ describe('AI: limited hit rate', () => {
       ai.hp = 100;
       ai.alive = true;
       foe.pos = { x: 0, y: 0, z: 5 };
+      foe.vel = { x: 0, z: 0 }; // pinned target: zero velocity, else the AI's
+      // ballistic lead (pos + vel × flight time) would aim past it
       foe.hp = 100;
       foe.alive = true;
       m.units[2].pos = { x: -26, y: 0, z: 26 };

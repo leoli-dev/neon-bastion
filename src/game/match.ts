@@ -9,6 +9,7 @@ import { buildNavGraph, type NavGraph } from './map/navmesh';
 import { stepUnit } from './map/movement';
 import { createUnit, blueName, redName } from './units/units';
 import { fireWeapon, type FireResult, eyeOf } from './combat/hitscan';
+import { BulletSystem, type Bullet } from './combat/bullet';
 import { recoverHeat } from './combat/weapon';
 import { aiThink, createBrain, type MatchContext } from './ai/aiController';
 import { resolveSpectator, type SpectatorResult } from './ai/spectator';
@@ -25,6 +26,8 @@ export interface PlayerInput {
 
 export type MatchEvent =
   | { type: 'shot'; shooterId: number; res: FireResult }
+  // Fired the moment a ballistic bullet ARRIVES (not when it was fired).
+  | { type: 'impact'; shooterId: number; res: FireResult }
   | { type: 'hit'; victimId: number; part: 'head' | 'body' }
   | { type: 'kill'; killerId: number; victimId: number; item: KillFeedItem }
   | { type: 'end'; winner: Team };
@@ -53,6 +56,9 @@ export class Match {
   solids: import('./types').Solid[];
   graph: NavGraph;
   units: Unit[] = [];
+  /** In-flight ballistic bullets. Every shot spawns one; it settles (damage,
+   *  scoring, kill) at arrival via BulletSystem.step -> onBulletImpact. */
+  bullets = new BulletSystem();
   now = 0;
   state: 'running' | 'ended' = 'running';
   winner: Team | null = null;
@@ -95,6 +101,7 @@ export class Match {
       sprint: false, jump: false, fire: false,
     };
     this.triggerLatched = false;
+    this.bullets.clear();
     this.units = [];
     let id = 0;
     for (let i = 0; i < 4; i++) {
@@ -186,14 +193,25 @@ export class Match {
   }
 
   /**
-   * The single fire pipeline shared by player AND AI shooters: resolve the
-   * shot, then broadcast it on the Match event bus (shot/hit/kill). Every
-   * bullet in the match goes through here, so audio, tracers, sparks and the
-   * kill feed behave identically regardless of who is shooting.
+   * The single fire pipeline shared by player AND AI shooters: register the
+   * shot (cooldown + spread) and spawn a ballistic bullet in the match's
+   * BulletSystem, then broadcast the fire-time 'shot' event (muzzle flash,
+   * gun audio, recoil). Damage, scoring, hit/kill events all happen LATER,
+   * at arrival, in onBulletImpact — every bullet in the match goes through
+   * here, so audio, trails, sparks and the kill feed behave identically
+   * regardless of who is shooting.
    */
   private fireFrom(shooter: Unit, aim: Vec3): FireResult {
-    const res = fireWeapon({ units: this.units, solids: this.solids, shooter, aim, now: this.now, seed: this.seed });
-    if (res.fired) this.emitShot(shooter, res);
+    const res = fireWeapon({
+      units: this.units,
+      solids: this.solids,
+      shooter,
+      aim,
+      now: this.now,
+      seed: this.seed,
+      bullets: this.bullets,
+    });
+    if (res.fired) this.onEvent?.({ type: 'shot', shooterId: shooter.id, res });
     return res;
   }
 
@@ -246,13 +264,22 @@ export class Match {
     this.checkEnd();
   }
 
-  private emitShot(shooter: Unit, res: FireResult): void {
-    this.onEvent?.({ type: 'shot', shooterId: shooter.id, res });
+  /**
+   * Bullet arrival: the single place a fired bullet's hit is broadcast on
+   * the event bus (impact/hit/kill). The damage and scoring themselves were
+   * already applied inside BulletSystem.step via applyImpact (the shooter is
+   * credited even if it died while the bullet was in flight).
+   */
+  private onBulletImpact(b: Bullet): void {
+    const res = b.result;
+    if (!res) return;
+    this.onEvent?.({ type: 'impact', shooterId: b.shooterId, res });
     if (res.resolution?.kind === 'unit' && res.targetId != null) {
       this.onEvent?.({ type: 'hit', victimId: res.targetId, part: res.part ?? 'body' });
       if (res.killed) {
+        const shooter = this.units.find((u) => u.id === b.shooterId);
         const victim = this.units.find((u) => u.id === res.targetId);
-        if (victim) {
+        if (shooter && victim) {
           const item: KillFeedItem = {
             killer: shooter.name,
             victim: victim.name,
@@ -279,6 +306,9 @@ export class Match {
       const u = this.units[i];
       if (u.ai) aiThink(u, ctx);
     }
+    // Advance in-flight bullets; a bullet that arrives this tick settles its
+    // hit (damage/scoring) and its impact/hit/kill events fire here.
+    this.bullets.step(dt, this.now, this.units, this.solids, (b) => this.onBulletImpact(b));
     for (const u of this.units) {
       recoverHeat(u, dt, false);
     }

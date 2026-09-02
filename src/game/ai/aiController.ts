@@ -1,11 +1,14 @@
 // AI controller: a deterministic, fair state machine.
 //   assemble -> patrol -> engage -> (retreat when low) -> search -> cautious
 // Perception is limited (FOV + LOS + range + hearing). The AI never fires at
-// what it cannot see, and hitscan enforces wall occlusion, so it cannot shoot
-// through walls. Accuracy is limited by an aim-inaccuracy cone; reaction is
-// gated by a delay. At the shared 1-shot-per-second cadence there is no burst
-// concept: an AI with a target in sight simply fires one round whenever its
-// cooldown has elapsed ("fire when it's time").
+// what it cannot see, and the projectile's continuous-collision raycast
+// enforces wall occlusion, so it cannot shoot through walls. Bullets are
+// ballistic (CONFIG.bulletSpeed), so the AI leads moving targets by their
+// velocity × estimated flight time. Accuracy is limited by an aim-inaccuracy
+// cone (kept as the difficulty knob); reaction is gated by a delay. At the
+// shared 1-shot-per-second cadence there is no burst concept: an AI with a
+// target in sight simply fires one round whenever its cooldown has elapsed
+// ("fire when it's time").
 
 import type { Unit, Vec3, AIState, MapData, Solid } from '../types';
 import { CONFIG } from '../constants';
@@ -199,11 +202,23 @@ function doShoot(unit: Unit, ctx: MatchContext, now: number, target: Unit): void
   // burst — at 1 rps a "burst" would just be a sustained 1/s fire.
   if (now - unit.lastShotAt < CONFIG.ai.fireInterval) return;
   const eye = eyeOf(unit);
-  const dx = target.pos.x - eye.x;
+  // First-order lead: aim at (target position + target velocity × estimated
+  // flight time). Bullets fly at CONFIG.bulletSpeed, so at 30 m the bullet is
+  // airborne 0.5 s — aiming at the target's CURRENT position would miss any
+  // strafing target. One refinement pass keeps the distance honest at range.
+  let leadX = target.pos.x;
+  let leadZ = target.pos.z;
+  for (let i = 0; i < 2; i++) {
+    const d = Math.hypot(leadX - eye.x, leadZ - eye.z);
+    const tf = d / CONFIG.bulletSpeed;
+    leadX = target.pos.x + target.vel.x * tf;
+    leadZ = target.pos.z + target.vel.z * tf;
+  }
+  const dx = leadX - eye.x;
   const dy = target.pos.y + 0.9 - eye.y;
-  const dz = target.pos.z - eye.z;
+  const dz = leadZ - eye.z;
   const base = norm({ x: dx, y: dy, z: dz });
-  const dist = Math.hypot(dx, dz);
+  const dist = Math.hypot(leadX - eye.x, leadZ - eye.z);
   const speed = Math.hypot(unit.vel.x, unit.vel.z);
   const cone =
     CONFIG.ai.inaccuracyBase +

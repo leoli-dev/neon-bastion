@@ -46,7 +46,10 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     restart: (s?: number) => app.playAgain(s),
     mouseTurn: (dx, dy) => app.match.applyLook(dx, dy),
     input: (key, down) => app.setInputKey(key, down),
-    shoot: (dir?: Partial<Vec3>) => app.match.firePlayerShot(dir ? { x: dir.x ?? 0, y: dir.y ?? 0, z: dir.z ?? 0 } : undefined),
+    // Fire AND let the projectile fly to its resolution, in one synchronous
+    // call (advances the fixed-tick loop internally), so E2E reads the
+    // settled resolution/damage without racing the rAF loop.
+    shoot: (dir?: Partial<Vec3>) => app.shootImmediate(dir ? { x: dir.x ?? 0, y: dir.y ?? 0, z: dir.z ?? 0 } : undefined),
     applyDamage: (victimId, amount, causeId = -1) => app.match.applyDamage(victimId, amount, causeId),
     simulateHitOnPlayer: (causeId, part = 'body') => {
       const p = app.match.player;

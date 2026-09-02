@@ -16,6 +16,7 @@ import type { Match } from '../game/match';
 import type { MapData, Solid, Unit, Vec3 } from '../game/types';
 import { NEON_BASTION } from '../game/map/mapData';
 import { CONFIG } from '../game/constants';
+import { MAX_BULLETS } from '../game/combat/bullet';
 import { eyeOf } from '../game/combat/hitscan';
 
 // Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
@@ -59,6 +60,11 @@ interface Tracer {
   max: number;
 }
 
+interface BulletTrail {
+  line: THREE.Line;
+  mat: THREE.LineBasicMaterial;
+}
+
 interface Muzzle {
   mesh: THREE.Mesh;
   mat: THREE.MeshBasicMaterial;
@@ -81,6 +87,7 @@ export class Renderer {
   private map: MapData;
   private units: UnitVisual[] = [];
   private tracers: Tracer[] = [];
+  private bulletTrails: BulletTrail[] = [];
   private muzzles: Muzzle[] = [];
   private sparks: Spark[] = [];
   private sparkGeo: THREE.BoxGeometry;
@@ -128,6 +135,7 @@ export class Renderer {
     this.buildLights();
     this.buildArena(map);
     this.buildTracerPool(40);
+    this.buildBulletTrailPool(MAX_BULLETS);
     this.buildMuzzlePool(12);
     this.buildSparkPool(48);
     this.resize();
@@ -308,6 +316,24 @@ export class Renderer {
     }
   }
 
+  /** One trail slot per pooled bullet (see combat/bullet.ts). Unlike the old
+   *  fire-time tracer (muzzle -> impact, drawn as one full line at the moment
+   *  of firing), the trail is re-positioned EVERY FRAME on the bullet's
+   *  CURRENT position — a short streak that follows the projectile, so the
+   *  player can see a bullet coming AT them from a specific direction. */
+  private buildBulletTrailPool(n: number): void {
+    for (let i = 0; i < n; i++) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      const mat = new THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending });
+      const line = new THREE.Line(geo, mat);
+      line.frustumCulled = false;
+      line.visible = false;
+      this.scene.add(line);
+      this.bulletTrails.push({ line, mat });
+    }
+  }
+
   private buildMuzzlePool(n: number): void {
     for (let i = 0; i < n; i++) {
       const mat = new THREE.MeshBasicMaterial({ color: 0xffd24a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
@@ -417,6 +443,25 @@ export class Renderer {
     }
 
     this.updateCamera(match, dt);
+
+    // Bullet trails: one short streak per in-flight bullet, tracking its live
+    // position each frame (the bullet itself is stepped by the Match).
+    const trailLen = CONFIG.bulletTrail;
+    for (let i = 0; i < this.bulletTrails.length; i++) {
+      const t = this.bulletTrails[i];
+      const b = match.bullets.bullets[i];
+      if (b && b.active) {
+        const attr = t.line.geometry.getAttribute('position') as THREE.BufferAttribute;
+        attr.setXYZ(0, b.pos.x - b.dir.x * trailLen, b.pos.y - b.dir.y * trailLen, b.pos.z - b.dir.z * trailLen);
+        attr.setXYZ(1, b.pos.x, b.pos.y, b.pos.z);
+        attr.needsUpdate = true;
+        t.mat.opacity = 0.9;
+        t.line.visible = true;
+      } else {
+        t.mat.opacity = 0;
+        t.line.visible = false;
+      }
+    }
 
     // Tracers
     for (const t of this.tracers) {

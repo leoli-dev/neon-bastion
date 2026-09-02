@@ -35,6 +35,12 @@ export const CONFIG = {
   damageBody: 20,
   damageHead: 50,
   fireInterval: 1.0, // seconds between shots — one shot per second, shared by player AND AI. The ONLY firing limit (no magazines, no reserve, no reload — nobody can "run dry").
+  // Ballistic projectile: bullets FLY at this speed (units/s), so a shot takes
+  // distance/bulletSpeed seconds to arrive and can be dodged at range.
+  // 60 u/s => 0.17 s over 10 units, 0.5 s over 30 units: mid/long range is
+  // reactive, point blank is not. Tuning band: 45–80.
+  bulletSpeed: 60,
+  bulletMaxAge: 4, // seconds — hard lifetime cap for pooled bullets (safety, not expected)
   // spread (radians of cone)
   spreadBase: 0.0045,
   spreadHeatPerShot: 0.16, // heat added per shot
@@ -75,6 +81,7 @@ export const CONFIG = {
   freeCamHeight: 26, // top-down fallback camera height
 
   // --- Particles (all consumed by the renderer's effect pools) -------------
+  bulletTrail: 1.1, // length (units) of the short trail drawn behind an in-flight bullet
   tracerLife: 0.18, // ~11 frames at 60fps — long enough to be perceived
   sparkLife: 0.22,
   muzzleLife: 0.05, // a flash is a flash: a few frames

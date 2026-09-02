@@ -5,11 +5,12 @@
 import * as THREE from 'three';
 import { Match } from './game/match';
 import type { MatchEvent } from './game/match';
+import type { Vec3 } from './game/types';
 import { CONFIG } from './game/constants';
 import { Renderer } from './render/renderer';
 import { HUD } from './render/hud';
 import { Audio } from './game/audio';
-import { eyeOf } from './game/combat/hitscan';
+import { eyeOf, type FireResult } from './game/combat/hitscan';
 import { groundHeight } from './game/map/geometry';
 import { createTestHooks } from './testHooks';
 
@@ -258,9 +259,12 @@ export class App {
   private onEvent(e: MatchEvent): void {
     const p = this.match.player;
     if (e.type === 'shot') {
+      // Fire TIME: the trigger went. Muzzle flash, gun audio and recoil now;
+      // the bullet itself is drawn from its live position every frame
+      // (renderer bullet trails), and all hit feedback waits for the
+      // 'impact' event when the projectile ARRIVES.
       const shooter = this.match.units.find((u) => u.id === e.shooterId);
-      const res = e.res.resolution;
-      if (!shooter || !res) return;
+      if (!shooter) return;
       const from = eyeOf(shooter);
       const dir = e.res.aim ?? { x: Math.sin(shooter.yaw), y: 0, z: Math.cos(shooter.yaw) };
       const muzzle = new THREE.Vector3(
@@ -268,14 +272,7 @@ export class App {
         from.y - MUZZLE_DROP + dir.y * MUZZLE_OFFSET,
         from.z + dir.z * MUZZLE_OFFSET
       );
-      const to = res.point;
-      const toV = new THREE.Vector3(to.x, to.y, to.z);
-      // FX-01: tracer from the muzzle; muzzle flash; sparks for wall hits too
-      // (previously only unit hits produced feedback).
-      this.renderer.spawnTracer(muzzle, toV);
       this.renderer.spawnMuzzleFlash(muzzle);
-      if (res.kind === 'unit') this.renderer.spawnHitSpark(toV, e.res.part === 'head' ? 'head' : 'body');
-      else if (res.kind === 'wall') this.renderer.spawnHitSpark(toV, 'wall');
       const eye = eyeOf(p);
       const d = muzzle.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z));
       this.audio.shot(clamp(1 - d / 45, 0.05, 1));
@@ -283,11 +280,19 @@ export class App {
         // Firing recoil: each shot kicks the view up by CONFIG.shotKick;
         // the renderer eases it back once the trigger is released.
         this.renderer.addRecoil(CONFIG.shotKick);
-        if (res.kind === 'unit') {
-          this.audio.hit(e.res.part === 'head');
-          // Player feedback: hitmarker + floating damage number at the impact.
-          this.hud.onPlayerHit(e.res.part === 'head', res.point, e.res.damage);
-        }
+      }
+    } else if (e.type === 'impact') {
+      // ARRIVAL: the bullet landed. Sparks, hitmarker and damage numbers are
+      // all consequences of the hit, so they fire here — not at fire time.
+      const res = e.res.resolution;
+      if (!res) return;
+      const toV = new THREE.Vector3(res.point.x, res.point.y, res.point.z);
+      if (res.kind === 'unit') this.renderer.spawnHitSpark(toV, e.res.part === 'head' ? 'head' : 'body');
+      else if (res.kind === 'wall') this.renderer.spawnHitSpark(toV, 'wall');
+      if (e.shooterId === 0 && res.kind === 'unit') {
+        this.audio.hit(e.res.part === 'head');
+        // Player feedback: hitmarker + floating damage number at the impact.
+        this.hud.onPlayerHit(e.res.part === 'head', res.point, e.res.damage);
       }
     } else if (e.type === 'hit') {
       // The player took a hit: vignette + damage-direction arc + pain sfx +
@@ -367,6 +372,23 @@ export class App {
 
     this.raf = requestAnimationFrame(this.loop);
   };
+
+  /** Deterministic test path: fire a player shot and advance the simulation
+   *  (bounded) until the projectile settles, then return the SETTLED result —
+   *  so callers can read resolution/damage/score from one synchronous call
+   *  even though bullets now have real flight time. */
+  shootImmediate(dir?: Vec3): FireResult | null {
+    const res = this.match.firePlayerShot(dir);
+    if (!res || res.bulletId == null) return res;
+    const b = this.match.bullets.get(res.bulletId);
+    if (!b) return res;
+    let i = 0;
+    while (!b.result && i < 600 && this.match.state === 'running') {
+      this.match.tick(TICK);
+      i++;
+    }
+    return b.result ?? res;
+  }
 
   // ---- test hooks --------------------------------------------------------
 
