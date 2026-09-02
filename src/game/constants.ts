@@ -49,8 +49,7 @@ export const CONFIG = {
 
   // --- AI (all configurable, same rules both teams) -----------------------
   ai: {
-    fovDeg: 100, // field of view half used as ~this wide (we use half-angle below)
-    fovHalfDeg: 50, // half-angle; effective cone = 100deg
+    fovHalfDeg: 50, // half-angle of the vision cone (100° total, used directly)
     visionDist: 38, // max direct-line sight distance
     soundDist: 26, // how far gunfire is "heard"
     reactTime: 0.26, // seconds before an AI can return fire after acquiring
@@ -68,6 +67,7 @@ export const CONFIG = {
     retreatHp: 32, // drop to 'retreat' at or below this HP
     // behaviour timing
     decideInterval: 0.22, // how often an AI re-evaluates its state
+    alertTime: 2.2, // how long an AI holds the 'alert' state investigating a sound
     searchTime: 3.0, // how long to search a last-known position
     coverTime: 1.4, // how long to hold cover
     advanceJitter: 4.0, // how far ahead of a waypoint to pick the next goal

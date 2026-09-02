@@ -1,21 +1,50 @@
 // Three.js renderer for Neon Bastion. Owns the WebGL scene, the static arena
-// (built from map data), the 8 unit meshes, tracer/spark effects, the camera
-// (FPV + spectator), and the 2D canvas minimap. The game logic (Match) is
-// driven elsewhere; this class only renders whatever state the Match reports.
+// (built from map data), the 8 unit meshes + ground team-rings, tracer/spark
+// effects, the camera (FPV + spectator), and the 2D canvas minimap. The game
+// logic (Match) is driven elsewhere; this class only renders whatever state the
+// Match reports.
+//
+// Visual direction (see design review): saturation is reserved for *people*
+// and *hit feedback*. The arena itself is built from lightness steps in a
+// near-neutral grey so a bright cyan or magenta silhouette always reads as "a
+// unit". Blue team is pushed to cyan to separate it from the cool concrete;
+// red team is a hot magenta-red. Warm sodium lamps + an ACES tonemap give the
+// scene layered, cinematic darkness instead of a flat grey.
 
 import * as THREE from 'three';
 import type { Match } from '../game/match';
-import type { MapData, Solid, Unit } from '../game/types';
+import type { MapData, Solid, Unit, Vec3 } from '../game/types';
 import { NEON_BASTION } from '../game/map/mapData';
 import { eyeOf } from '../game/combat/hitscan';
 
-const BLUE = { body: 0x2f7bff, head: 0x9fd0ff, emissive: 0x123a8a };
-const RED = { body: 0xff2f5e, head: 0xffc2d0, emissive: 0x7a1226 };
+// Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
+// wheel, both fully saturated, sitting on a desaturated ~210°/8% environment.
+const BLUE = { body: 0x18e0ff, head: 0xb8f6ff, emissive: 0x0a6e8c, ring: 0x18e0ff };
+const RED = { body: 0xff3d63, head: 0xffc9d4, emissive: 0x8a1530, ring: 0xff3d63 };
+
+// Arena palette: pure lightness steps, no hue. Each class is ~1.5x brighter
+// than the one before it, so cover (the thing you judge in a split second) is
+// the brightest architecture and the boundary recedes into the background.
+const ENV = {
+  background: 0x05070b,
+  ground: 0x0a0d13,
+  boundary: 0x0e1013,
+  wall: 0x1a1d22,
+  ramp: 0x2a2f36,
+  platform: 0x333a44,
+  cover: 0x3a4048,
+  spawn: 0x14181f,
+  gridA: 0x2a3038,
+  gridB: 0x171b22,
+  edgeNeutral: 0x2a3a5a,
+  edgePlatform: 0x3fa9ff,
+};
 
 interface UnitVisual {
   group: THREE.Group;
   body: THREE.Mesh;
   head: THREE.Mesh;
+  ring: THREE.Mesh;
   team: 'blue' | 'red';
   bodyMat: THREE.MeshStandardMaterial;
   headMat: THREE.MeshStandardMaterial;
@@ -48,14 +77,23 @@ export class Renderer {
   private minimap: CanvasRenderingContext2D;
   private minimapSize: number;
   private freeCamAngle = 0;
+  private reducedMotion = false;
 
   constructor(canvas: HTMLCanvasElement, minimapCanvas: HTMLCanvasElement, map: MapData = NEON_BASTION) {
     this.map = map;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // ACES filmic tonemap + sRGB output: the single biggest reason the previous
+    // build read as a "flat grey dark" instead of a "layered dark".
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x05060a);
-    this.scene.fog = new THREE.Fog(0x05060a, 22, 72);
+    this.scene.background = new THREE.Color(ENV.background);
+    // The arena is only ~64 units wide; fogging at 22m smeared the whole
+    // firefight. Push it back so depth is a subtle cue, not a blur.
+    this.scene.fog = new THREE.Fog(ENV.background, 38, 95);
 
     this.camera = new THREE.PerspectiveCamera(78, 16 / 9, 0.1, 300);
     this.camera.position.set(0, 1.6, 27);
@@ -71,30 +109,55 @@ export class Renderer {
     this.resize();
   }
 
+  /** Honours prefers-reduced-motion: no tracers, fewer sparks, static cameras. */
+  setReducedMotion(on: boolean): void {
+    this.reducedMotion = on;
+  }
+
   private buildLights(): void {
-    this.scene.add(new THREE.HemisphereLight(0x3a4a7a, 0x0a0a12, 0.85));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+    // Cool sky + WARM ground bounce. The warm floor reflection is what makes
+    // concrete read as concrete instead of blue plastic.
+    this.scene.add(new THREE.HemisphereLight(0x2a3550, 0x241c14, 0.75));
+    const dir = new THREE.DirectionalLight(0xfff0dd, 0.6);
     dir.position.set(12, 24, 10);
     this.scene.add(dir);
-    const blueLight = new THREE.PointLight(0x2f7bff, 220, 60, 2);
+
+    // Warm sodium lamps at the two maze corners and the two wing mouths — the
+    // "clear light/dark hierarchy at the maze turns" the prompt asks for.
+    const sodium: Array<[number, number]> = [
+      [-10, 16],
+      [10, 16],
+      [23, 0],
+      [-23, 0],
+    ];
+    for (const [x, z] of sodium) {
+      const l = new THREE.PointLight(0xffb45a, 150, 26, 2);
+      l.position.set(x, 5.5, z);
+      this.scene.add(l);
+    }
+
+    // Team spawn glow (identity, kept but restrained under the tonemap).
+    const blueLight = new THREE.PointLight(0x18e0ff, 110, 50, 2);
     blueLight.position.set(0, 8, 26);
     this.scene.add(blueLight);
-    const redLight = new THREE.PointLight(0xff2f5e, 220, 60, 2);
+    const redLight = new THREE.PointLight(0xff3d63, 110, 50, 2);
     redLight.position.set(0, 8, -26);
     this.scene.add(redLight);
   }
 
   private solidMaterial(s: Solid): THREE.MeshStandardMaterial {
-    let color = 0x1a2233;
+    let color = ENV.wall;
     let emissive = 0x000000;
     let emissiveIntensity = 0;
     switch (s.kind) {
-      case 'boundary': color = 0x11141e; break;
-      case 'wall': color = 0x1c2438; break;
-      case 'cover': color = 0x262f45; break;
-      case 'platform': color = 0x2b3a5e; emissive = 0x112a55; emissiveIntensity = 0.5; break;
-      case 'ramp': color = 0x232c42; break;
-      case 'spawn': color = 0x2a2a3a; emissive = 0x101018; emissiveIntensity = 0.4; break;
+      case 'boundary': color = ENV.boundary; break;
+      case 'wall': color = ENV.wall; break;
+      case 'cover': color = ENV.cover; break;
+      case 'ramp': color = ENV.ramp; break;
+      case 'spawn': color = ENV.spawn; emissive = 0x101018; emissiveIntensity = 0.4; break;
+      // The platform is the one building allowed a hue: it is the contested
+      // high ground, so it earns a faint cyan glow.
+      case 'platform': color = ENV.platform; emissive = 0x16324f; emissiveIntensity = 0.55; break;
     }
     return new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.15, emissive, emissiveIntensity });
   }
@@ -103,15 +166,15 @@ export class Renderer {
     // Ground
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(120, 120),
-      new THREE.MeshStandardMaterial({ color: 0x090b12, roughness: 1, metalness: 0 })
+      new THREE.MeshStandardMaterial({ color: ENV.ground, roughness: 1, metalness: 0 })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = 0;
     this.scene.add(ground);
 
-    const grid = new THREE.GridHelper(64, 32, 0x274a86, 0x141d33);
+    const grid = new THREE.GridHelper(64, 32, ENV.gridA, ENV.gridB);
     (grid.material as THREE.Material).transparent = true;
-    (grid.material as THREE.Material).opacity = 0.35;
+    (grid.material as THREE.Material).opacity = 0.22;
     grid.position.y = 0.02;
     this.scene.add(grid);
 
@@ -132,22 +195,23 @@ export class Renderer {
       }
       const line = new THREE.LineSegments(
         edges,
-        new THREE.LineBasicMaterial({ color: s.kind === 'platform' ? 0x3fa9ff : 0x2a3a5a, transparent: true, opacity: 0.5 })
+        new THREE.LineBasicMaterial({ color: s.kind === 'platform' ? ENV.edgePlatform : ENV.edgeNeutral, transparent: true, opacity: s.kind === 'platform' ? 0.55 : 0.35 })
       );
       line.position.copy(mesh.position);
       this.scene.add(line);
     }
   }
 
-  /** Create the 8 unit visuals (blue 0-3, red 4-7). Call once at start. */
+  /** Create the 8 unit visuals (blue 0-3, red 4-7) + ground team rings. */
   buildUnits(units: Unit[]): void {
+    const ringGeo = new THREE.RingGeometry(0.34, 0.5, 28);
     for (const u of units) {
       const palette = u.team === 'blue' ? BLUE : RED;
       const bodyMat = new THREE.MeshStandardMaterial({
-        color: palette.body, emissive: palette.emissive, emissiveIntensity: 0.6, roughness: 0.5, metalness: 0.2
+        color: palette.body, emissive: palette.emissive, emissiveIntensity: 0.7, roughness: 0.5, metalness: 0.2
       });
       const headMat = new THREE.MeshStandardMaterial({
-        color: palette.head, emissive: palette.emissive, emissiveIntensity: 0.4, roughness: 0.4, metalness: 0.2
+        color: palette.head, emissive: palette.emissive, emissiveIntensity: 0.45, roughness: 0.4, metalness: 0.2
       });
       const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.0, 0.8), bodyMat);
       body.position.y = 0.5;
@@ -157,7 +221,19 @@ export class Renderer {
       group.add(body);
       group.add(head);
       this.scene.add(group);
-      this.units.push({ group, body, head, team: u.team, bodyMat, headMat });
+
+      // Ground team-colour ring: an additive flat circle that stays visible
+      // when a low-poly body is partially occluded by cover — the "non-UI"
+      // team cue the prompt asks for.
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: palette.ring, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.06;
+      this.scene.add(ring);
+
+      this.units.push({ group, body, head, ring, team: u.team, bodyMat, headMat });
     }
   }
 
@@ -186,6 +262,7 @@ export class Renderer {
 
   private tracerCursor = 0;
   spawnTracer(from: THREE.Vector3, to: THREE.Vector3): void {
+    if (this.reducedMotion) return;
     const t = this.tracers[this.tracerCursor++ % this.tracers.length];
     const attr = t.line.geometry.getAttribute('position') as THREE.BufferAttribute;
     attr.setXYZ(0, from.x, from.y, from.z);
@@ -198,12 +275,12 @@ export class Renderer {
 
   private sparkCursor = 0;
   spawnHitSpark(point: THREE.Vector3, head: boolean): void {
-    const n = head ? 5 : 3;
+    const n = (head ? 5 : 3) * (this.reducedMotion ? 0.5 : 1);
     for (let i = 0; i < n; i++) {
       const s = this.sparks[this.sparkCursor++ % this.sparks.length];
       s.mesh.position.copy(point);
-      s.mat.color.setHex(head ? 0xff5a5a : 0xffd24a);
-      s.life = s.max = 0.22;
+      s.mat.color.setHex(head ? 0xffd24a : 0xff5a5a);
+      s.life = s.max = this.reducedMotion ? 0.14 : 0.22;
       s.vel.set((Math.random() - 0.5) * 6, Math.random() * 5, (Math.random() - 0.5) * 6);
       s.mesh.visible = true;
     }
@@ -219,22 +296,27 @@ export class Renderer {
       v.group.position.set(u.pos.x, u.pos.y, u.pos.z);
       v.group.rotation.y = u.yaw;
       const dead = !u.alive;
-      // A corpse lies down and dims; a live unit stands.
+      // A corpse lies down and dims; a live unit stands and keeps its ground ring.
       if (dead) {
         v.group.rotation.z = Math.PI / 2;
         v.group.position.y = u.pos.y + 0.3;
         v.bodyMat.emissiveIntensity = 0.05;
         v.headMat.emissiveIntensity = 0.05;
+        v.ring.visible = false;
       } else {
         v.group.rotation.z = 0;
         const flashing = u.flashUntil > now;
-        v.bodyMat.emissiveIntensity = flashing ? 1.6 : 0.6;
-        v.headMat.emissiveIntensity = flashing ? 1.4 : 0.4;
+        v.bodyMat.emissiveIntensity = flashing ? 1.9 : 0.7;
+        v.headMat.emissiveIntensity = flashing ? 1.6 : 0.45;
+        v.ring.visible = true;
+        v.ring.position.set(u.pos.x, u.pos.y + 0.06, u.pos.z);
+        // Ring sits at the feet even on the platform (u.pos.y already carries height).
       }
-      // The player's own body is hidden while in first person.
+      // The player's own body is hidden while in first person (but its ring shows).
       const isPlayer = u.isPlayer;
       const fpv = match.spectate.mode === 'alive';
       v.group.visible = !isPlayer || !fpv;
+      if (isPlayer) v.ring.visible = !fpv && !dead;
     }
 
     this.updateCamera(match, dt);
@@ -268,6 +350,26 @@ export class Renderer {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /** Number of live effects — feeds the debug panel's "active particles". */
+  getStats(): { activeParticles: number; activeTracers: number } {
+    let parts = 0;
+    let tracers = 0;
+    for (const s of this.sparks) if (s.life > 0) parts++;
+    for (const t of this.tracers) if (t.life > 0) tracers++;
+    return { activeParticles: parts + tracers, activeTracers: tracers };
+  }
+
+  /** Project a world point to CSS pixels (for floating damage numbers). */
+  screenFromWorld(p: Vec3): { x: number; y: number; behind: boolean } {
+    const v = new THREE.Vector3(p.x, p.y, p.z);
+    v.project(this.camera);
+    return {
+      x: (v.x * 0.5 + 0.5) * window.innerWidth,
+      y: (-v.y * 0.5 + 0.5) * window.innerHeight,
+      behind: v.z > 1,
+    };
+  }
+
   private updateCamera(match: Match, dt: number): void {
     const p = match.player;
     const mode = match.spectate.mode;
@@ -288,16 +390,17 @@ export class Renderer {
         if (t && t.alive) focus = new THREE.Vector3(t.pos.x, t.pos.y + 1.4, t.pos.z);
       }
       if (focus) {
-        // Chase cam: offset behind/above the ally along a slowly drifting angle.
-        this.freeCamAngle += dt * 0.25;
+        // Chase cam: offset behind/above the ally along a slowly drifting angle
+        // (frozen under reduced-motion so the camera does not orbit).
+        if (!this.reducedMotion) this.freeCamAngle += dt * 0.25;
         const r = 6;
         const cx = focus.x + Math.sin(this.freeCamAngle) * r;
         const cz = focus.z + Math.cos(this.freeCamAngle) * r;
         this.camera.position.lerp(new THREE.Vector3(cx, focus.y + 3.2, cz), 0.15);
         this.camera.lookAt(focus);
       } else {
-        // Free cam: high orbit over the arena centre.
-        this.freeCamAngle += dt * 0.12;
+        // Free cam: high orbit over the arena centre (static under reduced-motion).
+        if (!this.reducedMotion) this.freeCamAngle += dt * 0.12;
         const r = 26;
         const cx = Math.sin(this.freeCamAngle) * r;
         const cz = Math.cos(this.freeCamAngle) * r;
@@ -307,6 +410,9 @@ export class Renderer {
     }
   }
 
+  // ------------------------------------------------------------------ minimap
+  // Rendered as a "bastion blueprint": near-black field, thin structural lines,
+  // two spawn wedges, live units as filled dots and the fallen as hollow rings.
   private drawMinimap(match: Match): void {
     const ctx = this.minimap;
     const S = this.minimapSize;
@@ -319,22 +425,48 @@ export class Renderer {
     const pz = (z: number) => (z - cz) * scale + S / 2;
 
     ctx.clearRect(0, 0, S, S);
-    ctx.fillStyle = 'rgba(6,8,14,0.85)';
+    ctx.fillStyle = '#0a0d12';
     ctx.fillRect(0, 0, S, S);
-    // Solids
-    ctx.fillStyle = 'rgba(90,120,180,0.5)';
+
+    // Spawn wedges (12% team colour) — blue south, red north.
+    ctx.fillStyle = 'rgba(24,224,255,0.14)';
+    ctx.fillRect(px(-12), pz(20), 24 * scale, (b.maxZ - 20) * scale);
+    ctx.fillStyle = 'rgba(255,61,99,0.14)';
+    ctx.fillRect(px(-12), pz(b.minZ), 24 * scale, (20 - b.minZ) * scale);
+
+    // Structural lines (1px) instead of filled blocks: the "blueprint" read.
+    ctx.strokeStyle = '#2a3a5a';
+    ctx.lineWidth = 1;
     for (const s of this.map.solids) {
-      ctx.fillRect(px(s.x - s.sx / 2), pz(s.z - s.sz / 2), Math.max(1, s.sx * scale), Math.max(1, s.sz * scale));
+      const x = px(s.x - s.sx / 2);
+      const y = pz(s.z - s.sz / 2);
+      const w = Math.max(1.5, s.sx * scale);
+      const h = Math.max(1.5, s.sz * scale);
+      if (s.kind === 'platform') {
+        ctx.fillStyle = 'rgba(63,169,255,0.16)';
+        ctx.fillRect(x, y, w, h);
+      }
+      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     }
-    // Units
+
+    // Units: alive = filled dot, dead = hollow ring. Player gets a white ring.
     for (const u of match.units) {
-      if (!u.alive) continue;
-      ctx.fillStyle = u.team === 'blue' ? '#3fa9ff' : '#ff4d6d';
-      const r = u.isPlayer ? 4 : 3;
+      const x = px(u.pos.x);
+      const y = pz(u.pos.z);
+      const col = u.team === 'blue' ? '#18e0ff' : '#ff3d63';
       ctx.beginPath();
-      ctx.arc(px(u.pos.x), pz(u.pos.z), r, 0, Math.PI * 2);
-      ctx.fill();
-      if (u.isPlayer) {
+      ctx.arc(x, y, u.isPlayer ? 4 : 3, 0, Math.PI * 2);
+      if (u.alive) {
+        ctx.fillStyle = col;
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      if (u.isPlayer && u.alive) {
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 1.5;
         ctx.stroke();

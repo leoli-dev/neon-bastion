@@ -21,6 +21,7 @@ export interface TeamArenaTestHooks {
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   forceSpectate: () => void;
+  repaintHud: () => void;
 }
 
 export function createTestHooks(app: App): TeamArenaTestHooks {
@@ -42,5 +43,6 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     teleport: (unitId, x, z) => app.teleport(unitId, x, z),
     fastForward: (seconds) => app.fastForward(seconds),
     forceSpectate: () => app.forceSpectate(),
+    repaintHud: () => app.repaintHud(),
   };
 }

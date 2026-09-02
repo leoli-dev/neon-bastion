@@ -135,6 +135,7 @@ export interface Unit {
 export type AIStateName =
   | 'assemble'
   | 'patrol'
+  | 'alert'
   | 'engage'
   | 'retreat'
   | 'search'

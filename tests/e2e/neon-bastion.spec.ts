@@ -1,90 +1,175 @@
 // ============================================================================
-// Neon Bastion — Playwright E2E (5 scenarios, 4 real-game screenshots)
+// Neon Bastion — Playwright E2E
 // ----------------------------------------------------------------------------
-// These drive the REAL built app (vite preview) in headless Chromium with
+// Drives the REAL built app (vite preview, dist/) in headless Chromium with
 // WebGL (SwiftShader). Logic is advanced deterministically through the
-// window.__teamArenaTest hooks (fastForward / teleport / shoot / applyDamage /
-// forceSpectate / restart), so the assertions are stable and network-free.
-// Four screenshots of the real rendered game are saved to screenshots/.
+// window.__teamArenaTest hooks (start / shoot / applyDamage / teleport /
+// fastForward / forceSpectate). Determinism trick: any setup + action +
+// readout that must be atomic happens inside ONE page.evaluate, so the browser
+// rAF loop (which also ticks the match in real time) cannot interleave.
 //
-// NOTE: page.evaluate serializes only its callback, so inside each callback we
-// access the hooks via `window.__teamArenaTest` directly (no free vars).
+// Six scenarios:
+//   1. boot + pointer lock + WASD movement + wall collision + real render
+//   2. body + head hits -> HP / score / leaderboard / hitmarker, then a
+//      wall-blocked shot (no through-wall damage)
+//   3. death -> can't fire -> spectate ally -> switch -> free camera
+//   4. blue wins -> match freezes -> results board -> restart resets 8 units
+//   5. seeded AI fast-forward -> match terminates, no negative HP, and the
+//      scoring invariant totalScore === hitScore + 3*kills holds for everyone
+//   6. no-WebGL fallback (?nogl=1) -> legible 2D status, no white screen/error
+// Four screenshots of the real rendered game are saved to screenshots/.
 // ============================================================================
 
 import { test, expect } from '@playwright/test';
 
 type U = {
   id: number;
-  hp: number;
+  name: string;
+  team: 'blue' | 'red';
+  isPlayer: boolean;
   alive: boolean;
-  mag: number;
-  totalScore: number;
+  hp: number;
   pos: { x: number; y: number; z: number };
+  yaw: number;
+  mag: number;
+  kills: number;
+  hitScore: number;
+  totalScore: number;
+  aiState: string | null;
+  aiTarget: number;
+  aiLastSeen: { x: number; z: number } | null;
 };
 type Snap = {
   now: number;
-  state: string;
+  state: 'running' | 'ended';
   winner: 'blue' | 'red' | null;
-  spectate: { mode: string; targetId: number | null };
+  spectate: { mode: 'alive' | 'ally' | 'free'; targetId: number | null };
+  killfeed: unknown[];
   units: U[];
 };
 
-/** Sample the WebGL canvas and return color-diversity stats (guards against a
- *  blank/solid render being mistaken for a valid frame). */
-async function frameStats(page: import('@playwright/test').Page) {
-  return page.evaluate(() => {
-    const c = document.getElementById('webgl-canvas') as HTMLCanvasElement;
-    const tmp = document.createElement('canvas');
-    tmp.width = c.width;
-    tmp.height = c.height;
-    const ctx = tmp.getContext('2d')!;
-    ctx.drawImage(c, 0, 0);
-    const d = ctx.getImageData(0, 0, tmp.width, tmp.height).data;
-    const total = tmp.width * tmp.height;
-    const q = new Map<string, number>();
-    for (let i = 0; i < d.length; i += 4) {
-      const key = (d[i] >> 5) + ',' + (d[i + 1] >> 5) + ',' + (d[i + 2] >> 5);
-      q.set(key, (q.get(key) ?? 0) + 1);
-    }
-    let maxc = 0;
-    for (const v of q.values()) maxc = Math.max(maxc, v);
-    return { distinct: q.size, maxShare: maxc / total };
-  });
+type Hooks = {
+  version: string;
+  ready: boolean;
+  fallback?: boolean;
+  state: () => Snap;
+  start: () => void;
+  playAgain: () => void;
+  restart: (s?: number) => void;
+  input: (key: string, down: boolean) => void;
+  shoot: (dir?: { x: number; y: number; z: number }) => unknown;
+  applyDamage: (victimId: number, amount: number, causeId?: number) => void;
+  teleport: (unitId: number, x: number, z: number) => void;
+  fastForward: (seconds: number) => void;
+  forceSpectate: () => void;
+  repaintHud: () => void;
+};
+
+async function snap(page: import('@playwright/test').Page): Promise<Snap> {
+  return page.evaluate(() => (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest.state());
 }
 
-const GL_NOISE = /GL|WebGL|SwiftShader|fallback|GPU|driver|ANGLE|Vulkan/i;
+/** Size (bytes) of a screenshot of the WebGL canvas. A real 3D scene is a large
+ *  PNG (~100KB); a blank/failed GL canvas is a tiny flat PNG (~4KB). We take a few
+ *  shots and return the max, because a single capture can racy-catch a cleared
+ *  composited frame under headless rAF throttling. Uses the browser screenshot
+ *  pipeline (CDP), not the racy in-page drawImage. */
+async function arenaRenderBytes(page: import('@playwright/test').Page): Promise<number> {
+  let best = 0;
+  for (let i = 0; i < 6; i++) {
+    const buf = await page.locator('#webgl-canvas').screenshot();
+    best = Math.max(best, buf.length);
+    if (best > 20000) break;
+    await page.waitForTimeout(150);
+  }
+  return best;
+}
 
-// ---------------------------------------------------------------------------
-test('1: boots, shows HUD + start screen, renders the 3D arena', async ({ page }) => {
+// SwiftShader / GPU driver chatter is not a real app error.
+const GL_NOISE = /GL|WebGL|SwiftShader|fallback|GPU|driver|ANGLE|Vulkan|dawn|Vulkan/i;
+
+function trackErrors(page: import('@playwright/test').Page): string[] {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => {
     if (m.type() === 'error') errors.push(m.text());
   });
+  return errors;
+}
 
+async function ready(page: import('@playwright/test').Page): Promise<void> {
   await page.goto('/');
-  await expect(page.locator('#app')).toBeVisible();
+  await page.waitForFunction(() => (window as unknown as { __teamArenaTest?: { ready: boolean } }).__teamArenaTest?.ready === true);
+}
 
-  // Start screen.
+// ---------------------------------------------------------------------------
+test('1: boots, deploys (pointer lock), WASD moves, walls block, arena renders', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // Start screen + HUD present.
   await expect(page.locator('.nb-screen')).toBeVisible();
   await expect(page.locator('.nb-title')).toHaveText('NEON BASTION');
-
-  // HUD is present behind the start screen.
   await expect(page.locator('.nb-hp')).toBeVisible();
   await expect(page.locator('.nb-ammo')).toBeVisible();
   await expect(page.locator('.nb-board')).toBeVisible();
   await expect(page.locator('.nb-team')).toBeVisible();
   await expect(page.locator('canvas')).toHaveCount(2); // webgl + minimap
 
-  // Deploy.
-  await page.evaluate(() => (window as any).__teamArenaTest.start());
+  // Capture that the game requests pointer lock on deploy.
+  await page.evaluate(() => {
+    (window as unknown as Record<string, unknown>).__plRequested = false;
+    const orig = HTMLCanvasElement.prototype.requestPointerLock;
+    HTMLCanvasElement.prototype.requestPointerLock = function (...args: unknown[]) {
+      (window as unknown as Record<string, unknown>).__plRequested = true;
+      return (orig as () => Promise<void>).apply(this, args as []);
+    };
+  });
+  // Deploy via a real click (a user gesture) so the browser can grant pointer lock.
+  await page.locator('.nb-screen').click();
   await expect(page.locator('.nb-screen')).toBeHidden();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(700);
 
-  const stats = await frameStats(page);
-  console.log('ARENA PIXELS', JSON.stringify(stats));
-  expect(stats.distinct, 'arena should render with multiple colors').toBeGreaterThan(8);
-  expect(stats.maxShare, 'arena should not be a single flat color').toBeLessThan(0.9);
+  // The game must REQUEST pointer lock on deploy. Whether the headless browser
+  // actually GRANTS it is environment-dependent (it usually does not); the
+  // request is the app behaviour under test, and WASD/wall checks prove control.
+  const requested = await page.evaluate(() => (window as unknown as Record<string, boolean>).__plRequested);
+  expect(requested, 'the game should request pointer lock on deploy').toBe(true);
+  const granted = await page.evaluate(() => document.pointerLockElement === document.getElementById('webgl-canvas'));
+  console.log('pointer lock requested=true granted=' + granted);
+
+  // --- WASD movement: facing north (spawn yaw), hold W -> move -Z ---
+  const move = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(0, -3, 24); // clear south lane, still facing north
+    const z0 = t.state().units[0].pos.z;
+    t.input('KeyW', true);
+    t.fastForward(0.6);
+    t.input('KeyW', false);
+    return { z0, z1: t.state().units[0].pos.z };
+  });
+  expect(move.z1, 'holding W should move the player forward (north)').toBeLessThan(move.z0 - 1);
+
+  // --- Wall collision: run north into the central south column and be stopped.
+  // The cover column at (0,13) spans z 11.5..14.5; the player must not pass it.
+  const wall = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(0, 0, 20);
+    t.input('KeyW', true);
+    t.fastForward(2.0);
+    t.input('KeyW', false);
+    return { z: t.state().units[0].pos.z };
+  });
+  expect(wall.z, 'player should have moved toward the wall').toBeLessThan(20);
+  expect(wall.z, 'the column must block the player (no pass-through)').toBeGreaterThan(14.5);
+
+  // Real render, not a blank/flat screen. The browser screenshot pipeline (CDP)
+  // is more reliable than an in-page drawImage of a WebGL canvas; a real 3D scene
+  // is a large PNG (~100KB) while a blank/failed GL canvas is a tiny flat PNG
+  // (~4KB). We sample a few shots (headless rAF is throttled) and take the max.
+  const bytes = await arenaRenderBytes(page);
+  console.log('ARENA SCREENSHOT BYTES', bytes);
+  expect(bytes, 'arena should render (a real 3D scene is a large PNG; a blank canvas is ~4KB)').toBeGreaterThan(20000);
 
   await page.screenshot({ path: 'screenshots/01-arena.png' });
 
@@ -93,118 +178,258 @@ test('1: boots, shows HUD + start screen, renders the 3D arena', async ({ page }
 });
 
 // ---------------------------------------------------------------------------
-test('2: AI combat runs; the player weapon fires', async ({ page }) => {
-  await page.goto('/');
-  const init = await page.evaluate((): Snap => {
-    const t = (window as any).__teamArenaTest;
+test('2: body+head hits score correctly, hitmarker fires; wall blocks shots', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // --- Body hit: red unit 4 (Raxx) at 3m, clear lane, player deals 20. ---
+  const body = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
     t.start();
-    return t.state();
+    t.teleport(0, -3, 24);
+    t.teleport(4, -3, 21);
+    const st = t.state();
+    const p = st.units.find((u) => u.id === 0)!;
+    const target = st.units.find((u) => u.id === 4)!;
+    const eye = { x: p.pos.x, y: p.pos.y + 1.62, z: p.pos.z };
+    const p0 = { x: target.pos.x, y: target.pos.y + 0.7, z: target.pos.z };
+    let dx = p0.x - eye.x, dy = p0.y - eye.y, dz = p0.z - eye.z;
+    const l = Math.hypot(dx, dy, dz) || 1;
+    const r = t.shoot({ x: dx / l, y: dy / l, z: dz / l });
+    const s2 = t.state();
+    return {
+      fired: !!(r as { fired?: boolean }).fired,
+      kind: (r as { resolution?: { kind: string } }).resolution?.kind,
+      part: (r as { part?: string }).part,
+      damage: (r as { damage?: number }).damage,
+      hp4: s2.units.find((u) => u.id === 4)!.hp,
+      pScore: s2.units.find((u) => u.id === 0)!.totalScore,
+      hits: Number(document.querySelector('.nb-hitmark')?.getAttribute('data-hits') || '0'),
+    };
   });
+  expect(body.fired).toBe(true);
+  expect(body.kind).toBe('unit');
+  expect(body.part, 'aimed at the torso -> body hit').toBe('body');
+  expect(body.damage).toBe(20);
+  expect(body.hp4, 'body hit should remove 20 HP').toBe(80);
+  expect(body.pScore, 'a clean hit should add 1 point').toBeGreaterThanOrEqual(1);
+  expect(body.hits, 'the hitmarker should have registered a hit').toBeGreaterThanOrEqual(1);
 
-  // Player can shoot (alive right after deploy): firing consumes ammo.
-  const shot = await page.evaluate(() => {
-    const t = (window as any).__teamArenaTest;
-    const m0 = t.state().units[0].mag;
-    const r = t.shoot({ x: 0, y: 0, z: -1 });
-    const m1 = t.state().units[0].mag;
-    return { m0, m1, fired: r != null };
+  // --- Head hit: advance the fire cooldown, re-place target, aim at the head. ---
+  const head = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.fastForward(0.15); // > fireInterval (0.085s) so the player may fire again
+    t.teleport(4, -3, 21);
+    const st = t.state();
+    const p = st.units.find((u) => u.id === 0)!;
+    const target = st.units.find((u) => u.id === 4)!;
+    const eye = { x: p.pos.x, y: p.pos.y + 1.62, z: p.pos.z };
+    const p0 = { x: target.pos.x, y: target.pos.y + 1.6, z: target.pos.z }; // head center
+    let dx = p0.x - eye.x, dy = p0.y - eye.y, dz = p0.z - eye.z;
+    const l = Math.hypot(dx, dy, dz) || 1;
+    const before = target.hp;
+    const r = t.shoot({ x: dx / l, y: dy / l, z: dz / l });
+    return {
+      fired: !!(r as { fired?: boolean }).fired,
+      part: (r as { part?: string }).part,
+      damage: (r as { damage?: number }).damage,
+      before,
+      hp4: t.state().units.find((u) => u.id === 4)!.hp,
+    };
   });
-  expect(shot.fired).toBe(true);
-  expect(shot.m1).toBeLessThan(shot.m0);
+  expect(head.fired).toBe(true);
+  expect(head.part, 'aimed at the head -> headshot').toBe('head');
+  expect(head.damage).toBe(50);
+  expect(head.hp4, 'headshot should remove 50 HP').toBe(head.before - 50);
 
-  // Let the AI fight for ~12 logic-seconds.
-  await page.evaluate(() => (window as any).__teamArenaTest.fastForward(12));
-  const combat = await page.evaluate((): Snap => (window as any).__teamArenaTest.state());
+  // --- Wall-blocked: column between the player and the target -> no damage. ---
+  const blocked = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.fastForward(0.15);
+    t.teleport(0, 0, 20); // south of the central column
+    t.teleport(4, 0, -20); // north of it, behind cover
+    const before = t.state().units.find((u) => u.id === 4)!.hp;
+    const r = t.shoot({ x: 0, y: 0, z: -1 }); // straight north, into the column
+    return {
+      kind: (r as { resolution?: { kind: string } }).resolution?.kind,
+      before,
+      after: t.state().units.find((u) => u.id === 4)!.hp,
+    };
+  });
+  expect(blocked.kind, 'the column should stop the bullet').toBe('wall');
+  expect(blocked.after, 'no damage may pass through the wall').toBe(blocked.before);
 
-  const moved = combat.units.some(
-    (u, i) => Math.hypot(u.pos.x - init.units[i].pos.x, u.pos.z - init.units[i].pos.z) > 2,
-  );
-  expect(moved, 'units should move during combat').toBe(true);
+  // --- Leaderboard reflects the player's score. The board repaints on a 5-frame
+  // throttle and headless rAF is throttled, so force a deterministic repaint. ---
+  await page.evaluate(() => (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest.repaintHud());
+  const board = await page.locator('.nb-board').textContent();
+  expect(board, 'leaderboard should list the player (Vega) with a score').toMatch(/Vega/);
+  expect(board?.replace(/\s+/g, ' ')).toMatch(/Vega[\s\S]*\/\s*[1-9]/);
 
-  const damaged = combat.units.some((u) => u.hp < 100);
-  const scored = combat.units.some((u) => u.totalScore > 0);
-  expect(damaged || scored, 'combat should produce damage or score').toBe(true);
+  const st = await snap(page);
+  expect(st.units.find((u) => u.isPlayer)!.totalScore).toBeGreaterThanOrEqual(2); // body + head
 
-  await page.waitForTimeout(250);
-  await page.screenshot({ path: 'screenshots/02-combat.png' });
+  await page.screenshot({ path: 'screenshots/02-combat-hit.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });
 
 // ---------------------------------------------------------------------------
-test('3: death switches the player to spectator', async ({ page }) => {
-  await page.goto('/');
+test('3: death -> cannot fire -> spectate ally -> switch -> free camera', async ({ page }) => {
+  await ready(page);
   await page.evaluate(() => {
-    const t = (window as any).__teamArenaTest;
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
     t.start();
-    t.forceSpectate();
+    t.forceSpectate(); // player dies
   });
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(300);
 
-  const st = await page.evaluate((): Snap => (window as any).__teamArenaTest.state());
-  expect(st.units[0].alive).toBe(false);
-  expect(st.spectate.mode).not.toBe('alive');
+  // Dead + cannot fire.
+  const dead = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const alive = t.state().units[0].alive;
+    const r = t.shoot({ x: 0, y: 0, z: -1 });
+    return { alive, fired: !!(r as { fired?: boolean } | null)?.fired };
+  });
+  expect(dead.alive).toBe(false);
+  expect(dead.fired, 'a dead player cannot fire').toBe(false);
 
-  // The spectator bar is shown.
+  // Spectating a living ally by default.
   await expect(page.locator('.nb-spectate')).toBeVisible();
-  const bar = await page.locator('.nb-spectate').textContent();
-  expect(bar ?? '').toMatch(/SPECTATING|FREE CAMERA/i);
+  const spec = (await snap(page)).spectate;
+  expect(spec.mode).toBe('ally');
+  expect(spec.targetId).not.toBeNull();
 
   await page.screenshot({ path: 'screenshots/03-spectator.png' });
+
+  // Switch to the next ally (E).
+  const sw = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const before = t.state().spectate.targetId;
+    t.input('KeyE', true);
+    t.fastForward(0.1);
+    t.input('KeyE', false);
+    return { before, after: t.state().spectate.targetId };
+  });
+  expect(sw.after, 'Q/E should switch the spectated ally').not.toEqual(sw.before);
+
+  // Wipe the remaining blue allies -> no one left to spectate -> free camera.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    [1, 2, 3].forEach((id) => t.applyDamage(id, 999, 4));
+  });
+  const end = await snap(page);
+  expect(end.spectate.mode, 'with no living ally the camera goes free').toBe('free');
+  expect(end.spectate.targetId).toBeNull();
+  // Blue is fully eliminated, so the match ends (red wins) at that moment.
+  expect(end.state).toBe('ended');
+  expect(end.winner).toBe('red');
 });
 
 // ---------------------------------------------------------------------------
-test('4: match ends -> results -> restart resets state', async ({ page }) => {
-  await page.goto('/');
+test('4: blue wins -> match freezes -> results board -> restart resets 8 units', async ({ page }) => {
+  await ready(page);
   await page.evaluate(() => {
-    const t = (window as any).__teamArenaTest;
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
     t.start();
-    // Blue unit 0 scores the kill on every red -> red team wiped -> blue wins.
-    [4, 5, 6, 7].forEach((id) => t.applyDamage(id, 999, 0));
+    [4, 5, 6, 7].forEach((id) => t.applyDamage(id, 999, 0)); // blue wipes red
   });
   await page.waitForTimeout(250);
 
-  const st = await page.evaluate((): Snap => (window as any).__teamArenaTest.state());
+  const st = await snap(page);
   expect(st.state).toBe('ended');
   expect(st.winner).toBe('blue');
 
+  // Results screen + full board; the match-chrome must not bleed through.
   await expect(page.locator('.nb-res-title')).toBeVisible();
   await expect(page.locator('.nb-res-title')).toHaveText('BLUE WINS');
+  await expect(page.locator('.nb-board-lg .nb-row')).toHaveCount(8);
+  await expect(page.locator('.nb-root')).toHaveClass(/nb-results/);
+  await expect(page.locator('.nb-msg')).toBeHidden(); // the ENEMY DOWN flash is gone
+  await expect(page.locator('.nb-killfeed .nb-kf').first()).toBeHidden();
+
   await page.screenshot({ path: 'screenshots/04-results.png' });
 
-  // Restart via the results CTA.
+  // Frozen: nothing advances once the match is over.
+  const frozen = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const before = t.state().now;
+    t.fastForward(5);
+    return { before, after: t.state().now, state: t.state().state };
+  });
+  expect(frozen.after, 'the clock must not advance after the match ends').toBe(frozen.before);
+  expect(frozen.state).toBe('ended');
+
+  // Restart via the results CTA -> a fresh 8-unit match at full HP.
   await page.locator('.nb-cta').click();
   await page.waitForTimeout(250);
-  const st2 = await page.evaluate((): Snap => (window as any).__teamArenaTest.state());
+  const st2 = await snap(page);
   expect(st2.state).toBe('running');
+  expect(st2.units).toHaveLength(8);
   expect(st2.units.every((u) => u.alive && u.hp === 100)).toBe(true);
   await expect(page.locator('.nb-screen')).toBeHidden();
 });
 
 // ---------------------------------------------------------------------------
-test('5: hitscan respects wall occlusion (no through-wall damage)', async ({ page }) => {
-  await page.goto('/');
-  const r = await page.evaluate(() => {
-    const t = (window as any).__teamArenaTest;
+test('5: seeded AI fight terminates; no negative HP; scoring invariant holds', async ({ page }) => {
+  await ready(page);
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
     t.start();
-    const hp = (id: number) => t.state().units.find((u: U) => u.id === id).hp;
-
-    // Blocked: player south-centre, red far north. The 3m central column at
-    // (0,13) sits between them on the x=0 line and stops the bullet.
-    t.teleport(0, 0, 24);
-    t.teleport(4, 0, -24);
-    const beforeA = hp(4);
-    t.shoot({ x: 0, y: 0, z: -1 });
-    const afterA = hp(4);
-
-    // Elapse the weapon cooldown, then a clear line of fire just ahead.
-    t.fastForward(0.3);
-    t.teleport(0, 0, 24);
-    t.teleport(4, 0, 20);
-    t.shoot({ x: 0, y: 0, z: -1 });
-    const afterB = hp(4);
-
-    return { beforeA, afterA, afterB };
+    // Remove the passive human player so the match is pure AI (blue 3 vs red 4);
+    // otherwise the human unit camps at spawn and the match never reaches a
+    // terminal state.
+    t.forceSpectate();
+    t.fastForward(90); // let the (seeded) AI fight to completion
   });
 
-  expect(r.afterA, 'the wall should block the shot (no damage)').toBe(r.beforeA);
-  expect(r.afterB, 'the clear shot should deal damage').toBeLessThan(r.afterA);
+  const st = await snap(page);
+  expect(st.state, 'a seeded 4v4 should terminate').toBe('ended');
+  expect(st.winner).not.toBeNull();
+
+  // No unit may have negative HP.
+  expect(st.units.every((u) => u.hp >= 0)).toBe(true);
+
+  // The losing team is fully wiped; the winner still has members.
+  const loser = st.winner === 'blue' ? 'red' : 'blue';
+  expect(st.units.filter((u) => u.team === loser && u.alive).length).toBe(0);
+  expect(st.units.filter((u) => u.team === st.winner && u.alive).length).toBeGreaterThan(0);
+
+  // Scoring invariant for every unit: totalScore === hitScore + 3*kills.
+  const invariant = st.units.every((u) => u.totalScore === u.hitScore + 3 * u.kills);
+  expect(invariant, `invariant violated: ${st.units.map((u) => `${u.name} ${u.totalScore}!=${u.hitScore}+3*${u.kills}`).join(', ')}`).toBe(true);
+
+  // Real combat actually happened (someone died with a killer, or scored).
+  expect(st.units.some((u) => u.kills > 0) || st.units.some((u) => u.hitScore > 0)).toBe(true);
+});
+
+// ---------------------------------------------------------------------------
+test('6: no-WebGL fallback shows a legible 2D status, never a white screen', async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto('/?nogl=1');
+  await page.waitForFunction(() => (window as unknown as { __teamArenaTest?: { ready: boolean } }).__teamArenaTest?.ready === true);
+
+  // The 3D canvas app must NOT have booted; the fallback must be present.
+  await expect(page.locator('.nb-fallback')).toBeVisible();
+  await expect(page.locator('.nb-fallback h1')).toHaveText('NEON BASTION');
+
+  const text = (await page.locator('.nb-fallback').textContent()) ?? '';
+  expect(text, 'a clear "3D / WebGL unavailable" notice').toMatch(/WebGL|3D/);
+  expect(text, 'controls are explained').toMatch(/Move/);
+
+  // A live 2D battle status (canvas + score line) is rendered.
+  await expect(page.locator('.nb-fb-map')).toBeVisible();
+  await expect(page.locator('.nb-fb-score')).not.toBeEmpty();
+
+  const hook = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: { fallback?: boolean; state: () => { state: string; blueAlive: number; redAlive: number } } }).__teamArenaTest;
+    return { fallback: t.fallback, state: t.state() };
+  });
+  expect(hook.fallback).toBe(true);
+  expect(hook.state.blueAlive).toBeGreaterThanOrEqual(0);
+  expect(hook.state.redAlive).toBeGreaterThanOrEqual(0);
+
+  await page.screenshot({ path: 'screenshots/06-fallback.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors in the fallback: ' + real.join(' | ')).toHaveLength(0);
 });

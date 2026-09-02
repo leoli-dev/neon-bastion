@@ -129,6 +129,58 @@ describe('AI: beatable', () => {
   });
 });
 
+describe('AI: alert state', () => {
+  it('enters alert when it hears a threat it cannot see', () => {
+    const m = new Match(11);
+    const ai = m.units[1]; // a blue AI
+    const foe = m.units[4]; // a red unit
+    // The south approach cover column (solid 23) at (0,13) occludes the direct
+    // line, so the foe is HEARD (7m < soundDist) but never SEEN. Pin both so
+    // the AI can never walk around the occluder and must stay in 'alert'.
+    let sawAlert = false;
+    let neverSaw = true;
+    for (let i = 0; i < 240; i++) {
+      ai.pos = { x: 0, y: 0, z: 16.5 };
+      ai.yaw = Math.PI; // facing -Z (north)
+      foe.pos = { x: 0, y: 0, z: 9.5 };
+      foe.hp = 100;
+      foe.alive = true;
+      m.tick(DT);
+      if (ai.ai?.state === 'alert') sawAlert = true;
+      if (ai.ai?.state === 'engage') neverSaw = false;
+    }
+    expect(sawAlert, 'AI should investigate the sound in an alert state').toBe(true);
+    expect(neverSaw, 'AI must not engage a target it cannot see').toBe(true);
+    expect(foe.hp, 'no through-wall damage from the alerted AI').toBe(100);
+  });
+});
+
+describe('AI: full match terminates', () => {
+  it('a seeded all-AI match reaches a terminal state (no central-platform stalemate)', () => {
+    for (const seed of [20260212, 1, 99]) {
+      const m = new Match(seed);
+      // Remove the passive human player so the whole match is AI-driven; the
+      // human unit would otherwise camp at spawn and the match could never end.
+      m.player.alive = false;
+      m.player.hp = 0;
+      m.tick(DT);
+      for (let i = 0; i < 90 * 60 && m.state === 'running'; i++) m.tick(DT);
+      const snap = m.snapshot();
+      expect(snap.state, `seed ${seed}: the all-AI match must end`).toBe('ended');
+      expect(snap.winner, `seed ${seed}: a team must win`).not.toBeNull();
+      for (const u of snap.units) {
+        expect(u.hp, `seed ${seed}: ${u.name} hp`).toBeGreaterThanOrEqual(0);
+        expect(u.totalScore, `seed ${seed}: ${u.name} scoring invariant`).toBe(u.hitScore + 3 * u.kills);
+      }
+      const loser = snap.winner === 'blue' ? 'red' : 'blue';
+      expect(
+        snap.units.filter((u) => u.team === loser && u.alive).length,
+        `seed ${seed}: losing team fully eliminated`
+      ).toBe(0);
+    }
+  });
+});
+
 describe('AI: fair senses', () => {
   it('does not damage an enemy it cannot see through a wall', () => {
     const m = new Match(3);

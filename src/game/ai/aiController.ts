@@ -68,6 +68,11 @@ function nearest(list: readonly Unit[], from: Unit): Unit | null {
   return best;
 }
 
+/** Does this unit still have at least one living teammate (excluding itself)? */
+function hasLivingAllies(units: readonly Unit[], unit: Unit): boolean {
+  return units.some((u) => u.team === unit.team && u.alive && u.id !== unit.id);
+}
+
 function goPatrol(b: AIState): void {
   b.state = 'patrol';
   b.pathIndex = b.path.length; // force a fresh waypoint
@@ -249,6 +254,15 @@ export function aiThink(unit: Unit, ctx: MatchContext): void {
         b.state = 'engage';
         break;
       }
+      if (!hasLivingAllies(units, unit)) {
+        b.state = 'cautious';
+        break;
+      }
+      if (perc.heard.length > 0) {
+        b.state = 'alert';
+        b.stateUntil = now + CONFIG.ai.alertTime;
+        break;
+      }
       if (b.pathIndex >= b.path.length) setPath(unit, b, graph, pickPatrolNode(b, graph, unit, 'advance'));
       const m = followPath(unit, b, graph);
       vx = m.vx;
@@ -265,14 +279,46 @@ export function aiThink(unit: Unit, ctx: MatchContext): void {
         b.state = 'retreat';
         break;
       }
-      if (perc.heard.length > 0) {
+      if (!hasLivingAllies(units, unit)) {
         b.state = 'cautious';
+        break;
+      }
+      if (perc.heard.length > 0) {
+        b.state = 'alert';
+        b.stateUntil = now + CONFIG.ai.alertTime;
         break;
       }
       if (b.pathIndex >= b.path.length) setPath(unit, b, graph, pickPatrolNode(b, graph, unit, b.rng() < 0.6 ? 'advance' : 'wander'));
       const m = followPath(unit, b, graph);
       vx = m.vx;
       vz = m.vz;
+      break;
+    }
+    case 'alert': {
+      // Heard gunfire / sensed a threat but has not acquired a target: route
+      // toward the sound via the navmesh (so we go AROUND cover such as the
+      // central platform, instead of walking straight into it and getting
+      // stuck), then keep looking. Not a shoot state.
+      if (seen) {
+        b.state = 'engage';
+        break;
+      }
+      if (!hasLivingAllies(units, unit)) {
+        b.state = 'cautious';
+        break;
+      }
+      const h = nearest(perc.heard, unit);
+      if (h && now < b.stateUntil) {
+        if (b.pathIndex >= b.path.length) {
+          setPath(unit, b, graph, findNearestNode(graph, h.pos.x, h.pos.z, h.pos.y));
+        }
+        const m = followPath(unit, b, graph);
+        vx = m.vx * 0.85;
+        vz = m.vz * 0.85;
+        if (b.pathIndex >= b.path.length) goPatrol(b);
+      } else {
+        goPatrol(b);
+      }
       break;
     }
     case 'engage': {
@@ -324,20 +370,20 @@ export function aiThink(unit: Unit, ctx: MatchContext): void {
       break;
     }
     case 'cautious': {
+      // Last one on the team: push forward cautiously toward the centre /
+      // nearest threat, but never rush into the open.
       if (seen) {
         b.state = 'engage';
         break;
       }
-      const h = nearest(perc.heard, unit);
-      if (h) {
-        const hx = h.pos.x - unit.pos.x;
-        const hz = h.pos.z - unit.pos.z;
-        const d = Math.hypot(hx, hz);
-        if (d > 1) {
-          vx = (hx / d) * CONFIG.aiSpeed * 0.5;
-          vz = (hz / d) * CONFIG.aiSpeed * 0.5;
-        } else goPatrol(b);
-      } else goPatrol(b);
+      if (lowHp) {
+        b.state = 'retreat';
+        break;
+      }
+      if (b.pathIndex >= b.path.length) setPath(unit, b, graph, pickPatrolNode(b, graph, unit, 'advance'));
+      const m = followPath(unit, b, graph);
+      vx = m.vx * 0.7;
+      vz = m.vz * 0.7;
       break;
     }
     case 'dead':
