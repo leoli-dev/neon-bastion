@@ -85,6 +85,9 @@ type Hooks = {
   /** ART-06: a sight-clear spot on the player's facing that lands in the
    *  central screen band (null if none exists on this seed). */
   findCenterViewSpot: () => { x: number; z: number } | null;
+  /** ART-07: sand texture source canvases (base = final texture, mottle =
+   *  the mottling layer alone, for the repeat-seam probe). */
+  sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   /** AUD-01: how many player footstep triggers have fired since spawn/reseed. */
@@ -1219,6 +1222,143 @@ test('13: AUD-02 BGM — deploy starts the loop, `M` flips mute, key-up does not
   // Mute OFF: flips back and the loop resumes from where the app is.
   expect(res.afterUnmute.muted).toBe(false);
   expect(res.afterUnmute.playing, 'unmuting must resume the BGM scheduler').toBe(true);
+
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// ART-07: the two LOCAL defects in the daylight scene. All five ART-06
+// metrics are whole-frame statistics, so neither one of these could move
+// them: (a) the boundary wall was still the night-era near-black 0x0e1013,
+// cutting a dark horizon band across the blue-sky/sand frame; (b) the
+// procedural sand patches were hard-clipped at the repeat-tile edge,
+// drawing right-angle seams across the ground.
+test('14: ART-07 boundary wall — daylight-toned, not the night-era near-black', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // Park the FPV camera in the red-side open corridor (x=20), 5 m in front
+  // of the north boundary wall (inner face z=-30): on the classic layout
+  // (seed 16) nothing blocks that view (wing walls end at |z|=17, red spawn
+  // walls sit at x=±9), so the wall fills the central frame band. Pre-start
+  // the scene is static, so every sampled frame is the same settled view
+  // (same trick as the ART-06 probe).
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.seed(16); // 'Classic' layout: known wall positions
+    t.teleport(0, 20, -25); // spawn yaw π = facing -Z: straight at bound-n
+  });
+  await page.waitForTimeout(300);
+
+  // Sample a few frames (headless rAF is throttled; a frame captured before
+  // the teleport has presented still shows the OLD camera, which here means a
+  // BRIGHTER sand/sky view). So keep the MIN, never the max: a stale frame
+  // can only inflate the reading, and the settled frames are a static, stable
+  // view (pre-start the scene does not change between frames).
+  let wallLuma = Infinity;
+  for (let i = 0; i < 6; i++) {
+    const l = await page.evaluate(() => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0, 320, 180);
+      // Central band that is pure boundary wall in this view (the wall spans
+      // y ≈ 54..131 px at 320×180, full width).
+      const d = ctx.getImageData(96, 76, 128, 28).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      }
+      return sum / (d.length / 4);
+    });
+    wallLuma = Math.min(wallLuma, l);
+    await page.waitForTimeout(150);
+  }
+  console.log('ART-07 BOUNDARY WALL LUMA', wallLuma.toFixed(1));
+
+  // The night-era near-black (0x0e1013, albedo ≈ 6/255) measured L ≈ 10-20
+  // under this same daylight rig. A real boundary must read as a wall, well
+  // above that dark band.
+  expect(
+    wallLuma,
+    `boundary wall band meanLuma must be ≥ 60 (a regression to the near-black reads ~10-20) — got ${wallLuma.toFixed(1)}`
+  ).toBeGreaterThanOrEqual(60);
+
+  await page.screenshot({ path: 'screenshots/14-boundary-daylight.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+test('15: ART-07 sand repeat — mottling wraps the tile edge, no right-angle seam', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // The seam defect lives in the MOTTLE layer's repeat: a patch whose radial
+  // falloff crossed the 256 px tile edge used to be hard-clipped there, and
+  // tiled 14×14 it drew a straight right-angle line across the ground. The
+  // grain layer is per-pixel independent noise (nothing to clip), so the
+  // probe tiles the mottle layer 2×2 and compares the luminance-contribution
+  // jump across the tile boundary (x=S and y=S) against interior reference
+  // lines: a wrapped falloff shows only its local slope at the boundary —
+  // statistically the same as any interior line — while a hard clip leaves a
+  // step of up to alpha·ΔLuma (≈ 0.14 × 97 ≈ 13).
+  const seam = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const { mottle } = t.sandTextureCanvases();
+    const S = mottle.width;
+    const c = document.createElement('canvas');
+    c.width = c.height = 2 * S;
+    const ctx = c.getContext('2d')!;
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) ctx.drawImage(mottle, i * S, j * S);
+    const d = ctx.getImageData(0, 0, 2 * S, 2 * S).data;
+    const W = 2 * S;
+    // Luma contribution of one translucent mottle pixel (its actual add to
+    // whatever lies under it).
+    const contrib = (x: number, y: number): number => {
+      const i = (y * W + x) * 4;
+      return (d[i + 3] / 255) * (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]);
+    };
+    const vJump = (x: number): number => {
+      let s = 0;
+      for (let y = 0; y < W; y++) s += Math.abs(contrib(x + 1, y) - contrib(x, y));
+      return s / W;
+    };
+    const hJump = (y: number): number => {
+      let s = 0;
+      for (let x = 0; x < W; x++) s += Math.abs(contrib(x, y + 1) - contrib(x, y));
+      return s / W;
+    };
+    // x=S-1 -> x=S runs the FULL tile boundary (both rows of the 2×2 tiling);
+    // the inner tile lines at x=S/2 and x=3S/2 are the interior references.
+    const seamV = vJump(S - 1);
+    const seamH = hJump(S - 1);
+    const interiorV = (vJump(S / 2 - 1) + vJump((3 * S) / 2 - 1)) / 2;
+    const interiorH = (hJump(S / 2 - 1) + hJump((3 * S) / 2 - 1)) / 2;
+    // Max mottle contribution anywhere: guards that the layer actually
+    // carries patches (an empty texture would pass the seam check vacuously).
+    let maxC = 0;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) maxC = Math.max(maxC, contrib(x, y));
+    return {
+      seam: (seamV + seamH) / 2,
+      interior: (interiorV + interiorH) / 2,
+      maxC,
+    };
+  });
+  console.log('ART-07 SAND SEAM', JSON.stringify(seam));
+
+  expect(
+    seam.maxC,
+    `mottle layer must carry visible patches (max luma contribution ${seam.maxC.toFixed(1)}, expected ≥ 5)`
+  ).toBeGreaterThanOrEqual(5);
+
+  expect(
+    seam.seam,
+    `mean luma jump across the tile boundary must sit at interior-line level (seam ${seam.seam.toFixed(3)} vs interior ${seam.interior.toFixed(3)}; a hard clip leaves steps up to ~13) — got ${seam.seam.toFixed(3)}`
+  ).toBeLessThanOrEqual(seam.interior * 2 + 0.75);
 
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);

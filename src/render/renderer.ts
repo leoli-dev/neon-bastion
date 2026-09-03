@@ -40,7 +40,13 @@ const ENV = {
   // build never had. Grain/brightness perturbation is painted into a
   // procedural texture (see makeSandTexture) so the floor is not a flat fill.
   ground: 0xd9c08a,
-  boundary: 0x0e1013,
+  // ART-07: the boundary was the night-era near-black 0x0e1013, which drew a
+  // dark horizon band across the blue-sky/sand daylight scene. Now a neutral
+  // light grey-beige: clearly darker than the sand, neutral (NOT the hedge
+  // green) so the four wall classes still read as lightness steps, yet far
+  // too bright to pass for the void it used to be — the 4 m wall shape +
+  // edge lines keep the "impassable" read.
+  boundary: 0x97917f,
   // ART-03: raised from 0x1a1d22 (~11% lightness, unreadable in real play).
   wall: 0x23272e,
   ramp: 0x2a2f36,
@@ -422,19 +428,22 @@ export class Renderer {
   /** ART-06: procedural sand grain — a deterministic (seeded LCG, stable
    *  across reloads) per-pixel lightness jitter over the base sand colour,
    *  plus a scattering of soft dark/light patches so the floor has visible
-   *  texture and no large dead-flat region. Repeats across the 120 m plane. */
+   *  texture and no large dead-flat region. Repeats across the 120 m plane.
+   *  The mottling is painted on its OWN transparent layer (kept for the
+   *  ART-07 seam probe) and composited over the grain — the final texture is
+   *  pixel-identical to painting both on one canvas. */
   private makeSandTexture(): THREE.CanvasTexture {
     const S = 256;
-    const cv = document.createElement('canvas');
-    cv.width = cv.height = S;
-    const ctx = cv.getContext('2d')!;
     let s = 0x5a7d0d5a >>> 0; // fixed seed: deterministic texture
     const rnd = (): number => {
       s = (s * 48271) % 2147483647; // Park-Minimal LCG: stable per seed
       return s / 2147483647;
     };
     // Base sand 0xd9c08a with ±10 per-pixel lightness jitter (the grain).
-    const img = ctx.createImageData(S, S);
+    const grain = document.createElement('canvas');
+    grain.width = grain.height = S;
+    const gctx = grain.getContext('2d')!;
+    const img = gctx.createImageData(S, S);
     const [br, bg, bb] = [217, 192, 138];
     for (let i = 0; i < img.data.length; i += 4) {
       const j = (rnd() - 0.5) * 20;
@@ -443,27 +452,57 @@ export class Renderer {
       img.data[i + 2] = bb + j * 0.8;
       img.data[i + 3] = 255;
     }
-    ctx.putImageData(img, 0, 0);
+    gctx.putImageData(img, 0, 0);
     // Soft mottling: a handful of translucent light/dark patches on top.
+    // ART-07: each patch is ALSO repainted at the 8 neighbouring tile
+    // offsets, so a patch crossing a tile edge continues on the opposite
+    // side and the 14×14-repeat ground has no right-angle seam where a
+    // radial falloff used to be hard-clipped at the tile boundary.
+    const mottle = document.createElement('canvas');
+    mottle.width = mottle.height = S;
+    const mctx = mottle.getContext('2d')!;
     for (let i = 0; i < 36; i++) {
       const x = S * rnd();
       const y = S * rnd();
       const r = S * (0.05 + 0.16 * rnd());
       const dark = rnd() < 0.5;
       const a = 0.05 + rnd() * 0.09;
-      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, dark ? `rgba(120,95,55,${a})` : `rgba(255,240,205,${a})`);
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          const px = x + ox * S;
+          const py = y + oy * S;
+          const g = mctx.createRadialGradient(px, py, 0, px, py, r);
+          g.addColorStop(0, dark ? `rgba(120,95,55,${a})` : `rgba(255,240,205,${a})`);
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          mctx.fillStyle = g;
+          mctx.beginPath();
+          mctx.arc(px, py, r, 0, Math.PI * 2);
+          mctx.fill();
+        }
+      }
     }
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    const ctx = cv.getContext('2d')!;
+    ctx.drawImage(grain, 0, 0);
+    ctx.drawImage(mottle, 0, 0);
+    // Kept for the ART-07 E2E seam probe (the wrap-continuity of the
+    // mottling layer is exactly what a hard clip would break).
+    this.sandCanvas = cv;
+    this.sandMottleCanvas = mottle;
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
     tex.repeat.set(14, 14);
     return tex;
+  }
+
+  private sandCanvas: HTMLCanvasElement | null = null;
+  private sandMottleCanvas: HTMLCanvasElement | null = null;
+  /** ART-07 E2E hook: the sand texture's source canvases (unrepeated) so the
+   *  test can check the repeat wrap has no hard seam. */
+  getSandTextureCanvases(): { base: HTMLCanvasElement; mottle: HTMLCanvasElement } {
+    return { base: this.sandCanvas!, mottle: this.sandMottleCanvas! };
   }
 
   /** The solid boxes of one map (into arenaGroup so setMap can rebuild it). */

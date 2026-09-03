@@ -42,6 +42,10 @@ export interface TeamArenaTestHooks {
   /** ART-06: a sight-clear spot on the player's facing that lands in the
    *  central screen band (null if none exists on this seed). */
   findCenterViewSpot: () => { x: number; z: number } | null;
+  /** ART-07: the sand texture's source canvases (unrepeated): `base` is the
+   *  final grain+mottling texture, `mottle` is the mottling layer alone —
+   *  the seam probe checks the repeat wrap on the mottling layer. */
+  sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
   forceSpectate: () => void;
   repaintHud: () => void;
 }
@@ -80,6 +84,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     bgmMuted: () => app.audio.bgmMuted,
     bgmPlaying: () => app.audio.bgmPlaying,
     findCenterViewSpot: () => app.findCenterViewSpot(),
+    sandTextureCanvases: () => app.renderer.getSandTextureCanvases(),
     forceSpectate: () => app.forceSpectate(),
     repaintHud: () => app.repaintHud(),
   };
