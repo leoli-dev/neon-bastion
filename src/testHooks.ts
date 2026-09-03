@@ -35,6 +35,10 @@ export interface TeamArenaTestHooks {
   /** AUD-01: how many player footstep triggers have fired since the last
    *  spawn/reseed (grows only while grounded and moving). */
   footstepCount: () => number;
+  /** AUD-02: BGM mute state (toggled with `M`; SFX are never affected). */
+  bgmMuted: () => boolean;
+  /** AUD-02: true while the BGM scheduler is running. */
+  bgmPlaying: () => boolean;
   /** ART-06: a sight-clear spot on the player's facing that lands in the
    *  central screen band (null if none exists on this seed). */
   findCenterViewSpot: () => { x: number; z: number } | null;
@@ -73,6 +77,8 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     teleport: (unitId, x, z) => app.teleport(unitId, x, z),
     fastForward: (seconds) => app.fastForward(seconds),
     footstepCount: () => app.footstepCount(),
+    bgmMuted: () => app.audio.bgmMuted,
+    bgmPlaying: () => app.audio.bgmPlaying,
     findCenterViewSpot: () => app.findCenterViewSpot(),
     forceSpectate: () => app.forceSpectate(),
     repaintHud: () => app.repaintHud(),

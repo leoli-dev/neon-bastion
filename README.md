@@ -30,9 +30,10 @@ binding, and every real binding is listed.
 | `Esc` | Release the mouse / open the pause screen |
 | `F2` | Director mode (score-only overlay, hides all match chrome) |
 | `F3` / `` ` `` | Toggle the debug panel (units, AI states, perf) |
+| `M` | Toggle BGM mute (the synthesized background loop; SFX are never muted) |
 
 Not yet implemented (honest list): crouch, melee, weapon switching, Tab leaderboard
-hold, `P` pause, `M` mute.
+hold, `P` pause.
 
 Deploy / resume / restart are on-screen buttons (the deploy button also requests pointer
 lock, which the browser requires a user gesture for).
@@ -60,8 +61,8 @@ lock, which the browser requires a user gesture for).
   (unit hits AND wall hits), a live blueprint minimap (units as filled/hollow dots +
   team spawn wedges), fog, and ACES filmic tonemapping with a brightness floor
   (ambient + 6 sodium lamps) so the scene stays legible.
-- **Audio** — fully synthesized (fire, impact, headshot, UI, ambient hum); no
-  assets.
+- **Audio** — fully synthesized (fire, impact, headshot, footsteps, UI, and a
+  calm looping BGM — `M` toggles the loop, SFX always stay louder); no assets.
 - **No backend** — the whole match runs client-side; "restart" just reseeds the RNG.
 
 ## What changed in this pass

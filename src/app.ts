@@ -130,6 +130,8 @@ export class App {
     this.started = true;
     this.paused = false;
     this.audio.init();
+    // AUD-02: deploy (or resume from the pause screen) starts the BGM.
+    this.audio.bgmEnsurePlaying();
     this.hud.showScreen('none');
     this.requestLock();
   }
@@ -158,12 +160,16 @@ export class App {
     this.hud.flashMessage('DEPLOYING', '#9fc4ff');
     this.started = true;
     this.paused = false;
+    // AUD-02: fresh loop from the top for the new match.
+    this.audio.bgmStop();
+    this.audio.bgmEnsurePlaying();
     this.hud.showScreen('none');
     this.requestLock();
   }
 
   private pause(): void {
     this.paused = true;
+    this.audio.bgmPause(); // AUD-02
     this.hud.showScreen('pause');
   }
 
@@ -235,6 +241,10 @@ export class App {
       case 'Backquote':
         if (down) this.toggleDebug();
         break;
+      case 'KeyM':
+        // AUD-02: toggle the background-music mute (SFX stay on).
+        if (down) this.audio.toggleBgmMute();
+        break;
     }
   }
 
@@ -270,7 +280,10 @@ export class App {
       const locked = document.pointerLockElement === this.webglCanvas;
       if (locked) {
         this.hadLock = true;
-        if (this.started) this.paused = false;
+        if (this.started) {
+          this.paused = false;
+          this.audio.bgmEnsurePlaying(); // AUD-02: resume BGM on re-lock
+        }
       } else if (this.hadLock && this.started && this.match.state === 'running') {
         this.pause();
       }
@@ -338,6 +351,7 @@ export class App {
   }
 
   private onEnd(winner: 'blue' | 'red'): void {
+    this.audio.bgmStop(); // AUD-02: fade the loop out so the stinger is clear
     this.audio.end(winner === 'blue');
     this.hud.showResults(winner, this.match.snapshot());
     if (document.pointerLockElement === this.webglCanvas) document.exitPointerLock();

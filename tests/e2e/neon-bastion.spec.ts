@@ -89,6 +89,10 @@ type Hooks = {
   fastForward: (seconds: number) => void;
   /** AUD-01: how many player footstep triggers have fired since spawn/reseed. */
   footstepCount: () => number;
+  /** AUD-02: BGM mute state (toggled with `M`). */
+  bgmMuted: () => boolean;
+  /** AUD-02: true while the BGM scheduler is running. */
+  bgmPlaying: () => boolean;
   forceSpectate: () => void;
   repaintHud: () => void;
 };
@@ -1161,6 +1165,60 @@ test('12: AUD-01 footstep — walking increments the trigger counter, standing s
     res.afterStill,
     'standing still must not fire any further footstep triggers'
   ).toBe(res.afterMove);
+
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+test('13: AUD-02 BGM — deploy starts the loop, `M` flips mute, key-up does not re-toggle', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page);
+
+  // We assert on the state exposed on the test hooks, not on audible output
+  // (headless audio is silent by design — same reasoning as the AUD-01 test).
+  const res = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const before = { muted: t.bgmMuted(), playing: t.bgmPlaying() };
+    t.start(); // deploy: user gesture -> Audio.init() -> BGM scheduler
+    const afterStart = { muted: t.bgmMuted(), playing: t.bgmPlaying() };
+
+    // `M` key down -> mute ON: scheduler stops, SFX path untouched.
+    t.input('KeyM', true);
+    const afterMute = { muted: t.bgmMuted(), playing: t.bgmPlaying() };
+
+    // Key-up must NOT toggle again (edge-triggered, like F2/F3).
+    t.input('KeyM', false);
+    const afterKeyUp = t.bgmMuted();
+
+    // Second `M` key down -> mute OFF: back to the pre-mute state.
+    t.input('KeyM', true);
+    const afterUnmute = { muted: t.bgmMuted(), playing: t.bgmPlaying() };
+
+    return { before, afterStart, afterMute, afterKeyUp, afterUnmute };
+  });
+
+  // Starts unmuted, not playing (no deploy yet).
+  expect(res.before.muted).toBe(false);
+  expect(res.before.playing).toBe(false);
+
+  // Deploy starts the loop (the AudioContext is created + resumed by the
+  // start() gesture in this headless profile — if it were not running the
+  // scheduler stays off, which we would rather catch here than ship).
+  expect(res.afterStart.muted).toBe(false);
+  expect(res.afterStart.playing, 'deploy must start the BGM scheduler').toBe(true);
+
+  // Mute ON: state flips and the scheduler stops.
+  expect(res.afterMute.muted).toBe(true);
+  expect(res.afterMute.playing, 'muting must stop the BGM scheduler').toBe(false);
+
+  // Key-up does not re-toggle.
+  expect(res.afterKeyUp).toBe(true);
+
+  // Mute OFF: flips back and the loop resumes from where the app is.
+  expect(res.afterUnmute.muted).toBe(false);
+  expect(res.afterUnmute.playing, 'unmuting must resume the BGM scheduler').toBe(true);
 
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
