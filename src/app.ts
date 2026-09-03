@@ -91,7 +91,10 @@ export class App {
 
     this.seed = DEFAULT_SEED;
     this.match = new Match(this.seed);
-    this.renderer = new Renderer(this.webglCanvas, this.minimapCanvas);
+    // MAP-04: the renderer MUST draw the exact map the Match simulates
+    // (generateMap(seed) is random per seed), or collisions and pixels
+    // would disagree.
+    this.renderer = new Renderer(this.webglCanvas, this.minimapCanvas, this.match.map);
     this.renderer.buildUnits(this.match.units);
     this.hud = new HUD(this.appEl);
     this.audio = new Audio();
@@ -124,10 +127,25 @@ export class App {
     this.requestLock();
   }
 
+  /** MAP-04: rebuild the match (new seed -> new generated map + graph +
+   *  units) and the renderer's static arena from the same map. */
+  private rebuildMatch(): void {
+    this.match = new Match(this.seed);
+    this.renderer.setMap(this.match.map);
+    this.match.onEvent = (e) => this.onEvent(e);
+  }
+
+  /** Pin the seed and regenerate everything from it (used by the E2E seed
+   *  hook before the match starts). Leaves HUD/start-screen state alone. */
+  setSeed(seed: number): void {
+    this.seed = seed;
+    this.rebuildMatch();
+  }
+
   playAgain(seed?: number): void {
     const s = seed ?? ((this.seed + 1) | 0);
     this.seed = s;
-    this.match.reset(s);
+    this.rebuildMatch(); // new seed -> new map (MAP-04)
     this.hud.clearKillfeed();
     this.hud.flashMessage('DEPLOYING', '#9fc4ff');
     this.started = true;

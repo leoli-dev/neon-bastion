@@ -84,6 +84,8 @@ export class Renderer {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private map: MapData;
+  /** Static arena solids for the CURRENT map (rebuildable via setMap, MAP-04). */
+  private arenaGroup: THREE.Group;
   private units: UnitVisual[] = [];
   private tracers: Tracer[] = [];
   private bulletTrails: BulletTrail[] = [];
@@ -132,6 +134,8 @@ export class Renderer {
     this.muzzleGeo = new THREE.SphereGeometry(0.1, 8, 8);
 
     this.buildLights();
+    this.arenaGroup = new THREE.Group();
+    this.scene.add(this.arenaGroup);
     this.buildArena(map);
     this.buildTracerPool(40);
     this.buildBulletTrailPool(MAX_BULLETS);
@@ -255,6 +259,23 @@ export class Renderer {
     return new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.15, emissive, emissiveIntensity });
   }
 
+  /** MAP-04: swap the static arena geometry for a different (seed-generated)
+   *  map. The Match and the Renderer must always show the SAME map, or
+   *  collisions and pixels disagree. Ground, grid and lights are shared by
+   *  all layouts and stay put; only the solid boxes are rebuilt. */
+  setMap(map: MapData): void {
+    this.map = map;
+    for (const child of [...this.arenaGroup.children]) {
+      const obj = child as THREE.Mesh;
+      obj.geometry?.dispose();
+      const mat = obj.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+      else mat?.dispose();
+      this.arenaGroup.remove(child);
+    }
+    this.buildArenaSolids(map);
+  }
+
   private buildArena(map: MapData): void {
     // Ground
     const ground = new THREE.Mesh(
@@ -271,6 +292,11 @@ export class Renderer {
     grid.position.y = 0.02;
     this.scene.add(grid);
 
+    this.buildArenaSolids(map);
+  }
+
+  /** The solid boxes of one map (into arenaGroup so setMap can rebuild it). */
+  private buildArenaSolids(map: MapData): void {
     // Solids
     const edgeGeoCache = new Map<string, THREE.EdgesGeometry>();
     for (const s of map.solids) {
@@ -278,7 +304,7 @@ export class Renderer {
       const geo = new THREE.BoxGeometry(s.sx, h, s.sz);
       const mesh = new THREE.Mesh(geo, this.materialFor(s));
       mesh.position.set(s.x, s.bottom + h / 2, s.z);
-      this.scene.add(mesh);
+      this.arenaGroup.add(mesh);
 
       const key = `${s.sx}|${h}|${s.sz}`;
       let edges = edgeGeoCache.get(key);
@@ -291,7 +317,7 @@ export class Renderer {
         new THREE.LineBasicMaterial({ color: s.kind === 'platform' ? ENV.edgePlatform : ENV.edgeNeutral, transparent: true, opacity: s.kind === 'platform' ? 0.55 : 0.35 })
       );
       line.position.copy(mesh.position);
-      this.scene.add(line);
+      this.arenaGroup.add(line);
     }
   }
 

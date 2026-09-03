@@ -38,7 +38,9 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     ready: true,
     state: () => app.match.snapshot(),
     seed: (s?: number) => {
-      if (s !== undefined) app.seed = s;
+      // MAP-04: pinning the seed also REGENERATES the match map + renderer
+      // arena from it (call before start for a deterministic E2E layout).
+      if (s !== undefined) app.setSeed(s);
       return app.seed;
     },
     start: () => app.start(),

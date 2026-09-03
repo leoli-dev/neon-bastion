@@ -4,7 +4,7 @@
 
 import type { Unit, Team, MapData, Vec3, AIState } from './types';
 import { CONFIG } from './constants';
-import { NEON_BASTION } from './map/mapData';
+import { generateMap } from './map/mapData';
 import { buildNavGraph, type NavGraph } from './map/navmesh';
 import { stepUnit } from './map/movement';
 import { createUnit, blueName, redName } from './units/units';
@@ -75,7 +75,10 @@ export class Match {
   };
   onEvent?: (e: MatchEvent) => void;
 
-  constructor(seed: number, map: MapData = NEON_BASTION) {
+  /** MAP-04: default map is `generateMap(seed)` — a pure function of the
+   *  seed (random to the player, reproducible in tests). Explicit maps can
+   *  still be passed (unit tests / fixed scenarios rely on it). */
+  constructor(seed: number, map: MapData = generateMap(seed)) {
     this.seed = seed;
     this.map = map;
     this.solids = map.solids;

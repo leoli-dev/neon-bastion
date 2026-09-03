@@ -26,7 +26,20 @@
 // Eight screenshots of the real rendered game are saved to screenshots/.
 // ============================================================================
 
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+// MAP-04: every match's map is generated from the seed. E2E pins the seed
+// explicitly at the start of each test so the layout is fixed: seed 16 gives
+// the 'Classic' layout (identical to the old NEON_BASTION geometry, so all
+// hardcoded coordinates below stay valid) AND rolls `glass` on the south-
+// east maze wall that test 8 sees through.
+const PINNED_SEED = 16;
+async function pinSeed(page: Page): Promise<void> {
+  await page.evaluate(
+    (s) => (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest.seed(s),
+    PINNED_SEED
+  );
+}
 
 type U = {
   id: number;
@@ -58,6 +71,7 @@ type Hooks = {
   ready: boolean;
   fallback?: boolean;
   state: () => Snap;
+  seed: (s?: number) => number;
   start: () => void;
   playAgain: () => void;
   restart: (s?: number) => void;
@@ -143,6 +157,7 @@ async function ready(page: import('@playwright/test').Page): Promise<void> {
 test('1: boots, deploys (pointer lock), WASD moves, walls block, arena renders', async ({ page }) => {
   const errors = trackErrors(page);
   await ready(page);
+  await pinSeed(page);
 
   // Start screen + HUD present.
   await expect(page.locator('.nb-screen')).toBeVisible();
@@ -246,6 +261,7 @@ test('1: boots, deploys (pointer lock), WASD moves, walls block, arena renders',
 test('2: body+head hits score correctly, hitmarker fires; wall blocks shots', async ({ page }) => {
   const errors = trackErrors(page);
   await ready(page);
+  await pinSeed(page);
 
   // --- Body hit: red unit 4 (Raxx) at 3m, clear lane, player deals 20. ---
   const body = await page.evaluate(() => {
@@ -347,6 +363,7 @@ test('2: body+head hits score correctly, hitmarker fires; wall blocks shots', as
 // ---------------------------------------------------------------------------
 test('3: death -> cannot fire -> spectate ally -> switch -> free camera', async ({ page }) => {
   await ready(page);
+  await pinSeed(page);
   await page.evaluate(() => {
     const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
     t.start();
@@ -399,6 +416,7 @@ test('3: death -> cannot fire -> spectate ally -> switch -> free camera', async 
 // ---------------------------------------------------------------------------
 test('4: blue wins -> match freezes -> results board -> restart resets 8 units', async ({ page }) => {
   await ready(page);
+  await pinSeed(page);
   await page.evaluate(() => {
     const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
     t.start();
@@ -453,6 +471,7 @@ test('4: blue wins -> match freezes -> results board -> restart resets 8 units',
 // ---------------------------------------------------------------------------
 test('5: seeded AI fight terminates; no negative HP; scoring invariant holds', async ({ page }) => {
   await ready(page);
+  await pinSeed(page);
   await page.evaluate(() => {
     const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
     t.start();
@@ -487,6 +506,7 @@ test('5: seeded AI fight terminates; no negative HP; scoring invariant holds', a
 test('6: player hit -> vignette + damage-direction arc + camera kick; firing -> recoil', async ({ page }) => {
   const errors = trackErrors(page);
   await ready(page);
+  await pinSeed(page);
 
   // --- Player is hit by unit 4: red vignette flash, damage-direction arc at
   // the attacker's bearing, camera kick, pain sfx wiring — all from the
@@ -659,6 +679,7 @@ async function redPixelsInCentre(page: import('@playwright/test').Page): Promise
 test('8: glass wall is see-through — red unit behind it is visible in canvas pixels', async ({ page }) => {
   const errors = trackErrors(page);
   await ready(page);
+  await pinSeed(page);
 
   // Static pre-start scene: the fixed-tick loop only runs after start(), so
   // this placement cannot drift while frames present.
