@@ -88,6 +88,9 @@ type Hooks = {
   /** ART-07: sand texture source canvases (base = final texture, mottle =
    *  the mottling layer alone, for the repeat-seam probe). */
   sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
+  /** ART-12: the hedge foliage texture's source canvases (unrepeated);
+   *  `foliage` is the wrap-sensitive layer for the repeat-seam probe. */
+  hedgeTextureCanvases: () => { base: HTMLCanvasElement; foliage: HTMLCanvasElement };
   /** ART-08: per-unit local-space bounding boxes of the visible humanoid
    *  parts (ground ring excluded — floor marker; weapon excluded — explicit
    *  ART-10 exception, the held prop is not part of the hitbox). */
@@ -1830,6 +1833,261 @@ test('20: ART-11 first-person view model — bottom-right gun, crosshair clear, 
     'reduced motion: a minimal fire-kick feedback is kept'
   ).toBeGreaterThan(rm.px * 0.001);
 
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// ART-12: wall textures — hedge leaf-cluster texture, glass pane detail, and
+// the spawn-wall daylight fix (the review follow-up to ART-07: only the
+// boundary wall got the daylight treatment, the four 2×10 spawn-room slabs
+// were still the night-era near-black 0x14181f).
+//
+// BASELINES measured on the pre-ART-12 build (vite preview, seed 16
+// 'Classic', WebGL canvas resampled to 320×180, L = 0.2126R+0.7152G+0.0722B):
+//   * hedge region [x 120..200, y 60..130] — pure hedge wall 24
+//     (cover-n-col, hedge on seed 16) in the view, camera (0,-8) facing -Z:
+//     std = 0.145, mean = 57.4 (a FLAT fill; only tonemapping dither)
+//   * glass region [x 90..260, y 50..150] — glass wall 27 fills the frame
+//     at 1.5 m, camera (8,21.5) facing -Z, all reds parked off-axis:
+//     std = 37.9 (background variance only — no pane detail)
+//   * spawn band [x 100..220, y 80..105] — red-spawn west wall 8 m ahead,
+//     camera (0,-27) rotated to face -X, sunlit +X-facing side of the wall:
+//     the night-era near-black 0x14181f reads mean L ≈ 19 here (the red
+//     spawn point light is most of what lifts it at all — measured as the
+//     negative control when validating this test).
+// The ART-06 metrics (test 11) are untouched and must keep passing.
+
+/** Mean + luminance std of one box in the 320×180 resample. Pre-start the
+ *  scene is static, so sampling a few frames only picks up the settled view
+ *  (headless rAF is throttled); the max std is the sharpest of identical
+ *  frames. */
+async function regionLumaStats(
+  page: Page,
+  box: [number, number, number, number]
+): Promise<{ std: number; mean: number }> {
+  let best = { std: -1, mean: 0 };
+  for (let i = 0; i < 6; i++) {
+    const s = await page.evaluate((b: [number, number, number, number]) => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0, 320, 180);
+      const d = ctx.getImageData(b[0], b[1], b[2], b[3]).data;
+      const n = d.length / 4;
+      let sum = 0;
+      let sumsq = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const l = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        sum += l;
+        sumsq += l * l;
+      }
+      const mean = sum / n;
+      return { std: Math.sqrt(Math.max(0, sumsq / n - mean * mean)), mean };
+    }, box);
+    if (s.std > best.std) best = s;
+    await page.waitForTimeout(150);
+  }
+  return best;
+}
+
+test('21: ART-12 hedge wall — leaf-cluster texture, not a flat fill', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // Hedge wall 24 (cover-n-col, hedge on seed 16) is 3×3×3 m at (0,-13).
+  // The player stands 3.5 m south of it with the spawn yaw π (facing -Z):
+  // the wall fills the central frame band x 112..208, y 40..147 at 320×180.
+  // Static pre-start scene: no drift between frames.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.seed(16);
+    t.teleport(0, 0, -8);
+    [4, 5, 6, 7].forEach((id) => t.teleport(id, -26, 20)); // park the reds off-axis
+  });
+  await page.waitForTimeout(300);
+
+  const r = await regionLumaStats(page, [120, 60, 80, 70]);
+  console.log('ART-12 HEDGE REGION', JSON.stringify(r));
+
+  // The pre-ART-12 flat material measured std 0.145 here (tonemapping
+  // dither only). Real leaf clusters move that by ~2 orders of magnitude.
+  expect(
+    r.std,
+    `hedge region std must far exceed the flat-fill baseline 0.145 (leaf structure, not a colour) — got ${r.std.toFixed(2)}`
+  ).toBeGreaterThan(4);
+
+  // And the wall must not read darker (ART-06 guard): the baseline mean was
+  // 57.4 — the texture may cost at most a visible lightening of the leaf
+  // shadows, not a darkening of the wall.
+  expect(
+    r.mean,
+    `hedge region mean must stay near the baseline 57.4 (foliage must not get too dark) — got ${r.mean.toFixed(1)}`
+  ).toBeGreaterThanOrEqual(45);
+
+  await page.screenshot({ path: 'screenshots/21-hedge-texture.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+test('22: ART-12 hedge repeat — leaf layer wraps the tile edge, no right-angle seam', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // Same probe shape as the ART-07 sand seam test (15): the foliage layer
+  // (cluster pools + leaves) is tiled 2×2 and the luminance-contribution
+  // jump across the tile boundary (x=S, y=S) is compared against interior
+  // reference lines. A brush that crossed the tile edge WITHOUT the
+  // wrap-repaint would be hard-clipped there, leaving a right-angle step;
+  // wrapped brushes show only their local slope — same as any interior line.
+  const seam = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const { foliage } = t.hedgeTextureCanvases();
+    const S = foliage.width;
+    const c = document.createElement('canvas');
+    c.width = c.height = 2 * S;
+    const ctx = c.getContext('2d')!;
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) ctx.drawImage(foliage, i * S, j * S);
+    const d = ctx.getImageData(0, 0, 2 * S, 2 * S).data;
+    const W = 2 * S;
+    const contrib = (x: number, y: number): number => {
+      const i = (y * W + x) * 4;
+      return (d[i + 3] / 255) * (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]);
+    };
+    const vJump = (x: number): number => {
+      let s = 0;
+      for (let y = 0; y < W; y++) s += Math.abs(contrib(x + 1, y) - contrib(x, y));
+      return s / W;
+    };
+    const hJump = (y: number): number => {
+      let s = 0;
+      for (let x = 0; x < W; x++) s += Math.abs(contrib(x, y + 1) - contrib(x, y));
+      return s / W;
+    };
+    const seamV = vJump(S - 1);
+    const seamH = hJump(S - 1);
+    const interiorV = (vJump(S / 2 - 1) + vJump((3 * S) / 2 - 1)) / 2;
+    const interiorH = (hJump(S / 2 - 1) + hJump((3 * S) / 2 - 1)) / 2;
+    // Max contribution anywhere: guards the layer actually carries brushes
+    // (an empty texture would pass the seam check vacuously).
+    let maxC = 0;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) maxC = Math.max(maxC, contrib(x, y));
+    return { seam: (seamV + seamH) / 2, interior: (interiorV + interiorH) / 2, maxC };
+  });
+  console.log('ART-12 HEDGE SEAM', JSON.stringify(seam));
+
+  expect(
+    seam.maxC,
+    `foliage layer must carry visible brushes (max luma contribution ${seam.maxC.toFixed(1)}, expected ≥ 5)`
+  ).toBeGreaterThanOrEqual(5);
+
+  expect(
+    seam.seam,
+    `mean luma jump across the tile boundary must sit at interior-line level (seam ${seam.seam.toFixed(3)} vs interior ${seam.interior.toFixed(3)}) — got ${seam.seam.toFixed(3)}`
+  ).toBeLessThanOrEqual(seam.interior * 2 + 0.75);
+
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+test('23: ART-12 glass pane — frame + streaks add readable detail, still see-through', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // Same vantage as test 8 (MAP-01), minus the parked unit: glass wall 27
+  // (x 7..9, z 14..20) fills the frame 1.5 m ahead. The sampled band sits
+  // inside the pane (its edges: the left frame at ~x 62, the right at
+  // ~x 258, plus the right-edge fresnel glow inside the band), so the
+  // variance must come from the pane's own detail, not the background cut.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.seed(16);
+    t.teleport(0, 8, 21.5);
+    [4, 5, 6, 7].forEach((id) => t.teleport(id, -26, -20)); // keep the pane empty
+  });
+  await page.waitForTimeout(300);
+
+  const r = await regionLumaStats(page, [90, 50, 170, 100]);
+  console.log('ART-12 GLASS REGION', JSON.stringify(r));
+
+  // Pre-ART-12 (plain 0.22-alpha pane, no texture) this band measured
+  // std 37.9 — pure background variance. Frame keyline, fresnel glow and
+  // reflection streaks must push it measurably higher.
+  expect(
+    r.std,
+    `glass region std must exceed the plain-pane baseline 37.9 (visible pane detail) — got ${r.std.toFixed(2)}`
+  ).toBeGreaterThan(40);
+
+  // And it must still be mostly the bright background (the pane is 22%
+  // opaque at most): the band mean stays in the sunlit band, not a slab.
+  expect(
+    r.mean,
+    `glass region mean must stay in the transparent pane's light band (baseline 143) — got ${r.mean.toFixed(1)}`
+  ).toBeGreaterThanOrEqual(100);
+
+  await page.screenshot({ path: 'screenshots/23-glass-pane.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+test('24: ART-12 spawn wall — daylight-toned, not the night-era near-black', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // Camera in the red spawn room (0,-27), rotated to face -X (west): the
+  // red-spawn west wall (solid 5, 2×10×3 m) stands 8 m ahead and fills the
+  // band x 100..215, y 80..105 at 320×180. Its camera-facing face points +X
+  // — the SUN-LIT side (the sun sits at (18,28,10)) — so this measures the
+  // wall's best daylight reading, the fair target for a "not near-black"
+  // check (shade-side faces read darker by design; the player looks out of
+  // the room, not at the side walls). Pre-start the scene is static (same
+  // trick as the ART-06/ART-07 probes); sample the MIN over frames, never
+  // the max (a stale frame before the teleport presented can only inflate
+  // the reading). The room's red point light (0,8,-26) adds the warm cast.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.seed(16); // Classic layout: known wall positions
+    t.teleport(0, 0, -27);
+    t.mouseTurn(-Math.PI / 2 / 0.0022, 0); // yaw π -> -π/2: face -X at the spawn wall
+    [4, 5, 6, 7].forEach((id) => t.teleport(id, -26, 20)); // park the reds off-axis
+  });
+  await page.waitForTimeout(300);
+
+  let wallLuma = Infinity;
+  for (let i = 0; i < 6; i++) {
+    const l = await page.evaluate(() => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0, 320, 180);
+      // Central band that is pure spawn wall in this view.
+      const d = ctx.getImageData(100, 80, 120, 25).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      }
+      return sum / (d.length / 4);
+    });
+    wallLuma = Math.min(wallLuma, l);
+    await page.waitForTimeout(150);
+  }
+  console.log('ART-12 SPAWN WALL LUMA', wallLuma.toFixed(1));
+
+  // The night-era near-black (0x14181f) measures mean L 18.9 under this
+  // exact view (negative control, measured while validating this test —
+  // the red point light is most of what lifts it) — a regression to it
+  // must fail here; the daylight sandstone (0x7d7565, albedo L ≈ 118)
+  // reads ≈ 79 in this view.
+  expect(
+    wallLuma,
+    `spawn wall band meanLuma must be ≥ 60 (the night-era near-black reads ~19) — got ${wallLuma.toFixed(1)}`
+  ).toBeGreaterThanOrEqual(60);
+
+  await page.screenshot({ path: 'screenshots/24-spawn-daylight.png' });
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

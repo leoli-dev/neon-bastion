@@ -47,6 +47,11 @@ export interface TeamArenaTestHooks {
    *  final grain+mottling texture, `mottle` is the mottling layer alone —
    *  the seam probe checks the repeat wrap on the mottling layer. */
   sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
+  /** ART-12: the hedge foliage texture's source canvases (unrepeated):
+   *  `base` is the final grain+foliage texture, `foliage` is the wrap-
+   *  sensitive layer alone — the seam probe checks its repeat wrap, the
+   *  same probe shape as the ART-07 sand seam test. */
+  hedgeTextureCanvases: () => { base: HTMLCanvasElement; foliage: HTMLCanvasElement };
   /** ART-08: per-unit LOCAL-space bounding boxes of the visible humanoid
    *  parts (ground ring excluded — a floor marker, not the character; weapon
    *  also excluded — an explicit ART-10 exception: the held prop is NOT part
@@ -131,6 +136,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     bgmPlaying: () => app.audio.bgmPlaying,
     findCenterViewSpot: () => app.findCenterViewSpot(),
     sandTextureCanvases: () => app.renderer.getSandTextureCanvases(),
+    hedgeTextureCanvases: () => app.renderer.getHedgeTextureCanvases(),
     unitVisualBounds: () => app.renderer.unitVisualBounds(),
     weaponState: (unitId) => app.weaponProbe(unitId),
     viewModelVisible: (v) => app.renderer.setViewModelVisible(v),

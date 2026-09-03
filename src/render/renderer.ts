@@ -97,10 +97,30 @@ const ENV = {
   // edge lines keep the "impassable" read.
   boundary: 0x97917f,
   // ART-03: raised from 0x1a1d22 (~11% lightness, unreadable in real play).
+  // ART-12: kept, NOT deleted — after MAP-03/MAP-04 the SHIPPED maps have no
+  // `wall`-kind solid with the plain `solid` material (every inner wall rolls
+  // hedge/glass), and the fixed NEON_BASTION map is only used by the unit
+  // tests (game logic — it is never rendered by the app), so this colour is
+  // unreachable in the built game. It stays so the switch below remains
+  // exhaustive and a future plain wall would still render.
   wall: 0x23272e,
+  // ART-12: same story — MAP-03 removed every ramp from every layout, so no
+  // solid uses kind 'ramp' anymore (the kind stays in the type union for the
+  // geometry helpers; the palette entry is kept for the same reason as above).
   ramp: 0x2a2f36,
+  // ART-12: MAP-03 removed the central platform; no layout uses kind
+  // 'platform' anymore (kept, do not delete — see `wall` above).
   platform: 0x333a44,
-  spawn: 0x14181f,
+  // ART-12: the spawn-room walls (solid ids 4-7, four 2×10 slabs) were still
+  // the night-era near-black 0x14181f (L ≈ 24) — four black slabs standing
+  // in the blue-sky/sand daylight scene (visible in the reviewer's raw
+  // canvas dump). Now a warm neutral sandstone step between `boundary`
+  // (L 145) and the hedge green (L 107): the wall classes still read as a
+  // lightness ladder (sand 193 > boundary 145 > spawn 118 > hedge 107), and
+  // the neutral (non-green) hue keeps the "this is a spawn-room wall" read.
+  // The night-era emissive 0x101018 @ 0.4 (a faint blue glow) is gone with
+  // the night scene — it made the walls read even darker/bluer by contrast.
+  spawn: 0x7d7565,
   edgeNeutral: 0x2a3a5a,
   edgePlatform: 0x3fa9ff,
 };
@@ -506,7 +526,14 @@ export class Renderer {
       // Opaque foliage: saturated plant green, matte (high roughness, zero
       // metalness). A deterministic per-solid perturbation (seeded from the
       // solid id) shifts hue/saturation/lightness slightly so no two hedge
-      // walls read as exactly the same green.
+      // walls read as exactly the same green. ART-12: the leaf-cluster
+      // STRUCTURE (leaf shapes, cluster light/shadow pools, grain) lives in
+      // a shared near-white procedural texture (see makeHedgeCanvases) —
+      // near-white on purpose so THIS colour stays the wall's identity and
+      // the per-id hue perturbation works exactly as before (MAP-04).
+      // The same texture doubles as a bump map so the leaf layer has volume
+      // under oblique light. UVs are scaled per face (3 m per tile) in
+      // buildArenaSolids so a 34 m wing wall does not stretch one leaf.
       const c = new THREE.Color(0x3f7d3a);
       const hsl = { h: 0, s: 0, l: 0 };
       c.getHSL(hsl);
@@ -516,16 +543,26 @@ export class Renderer {
         Math.min(1, hsl.s + (t - 0.5) * 0.12),
         Math.min(1, Math.max(0, hsl.l + (t - 0.5) * 0.06)),
       );
-      return new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, metalness: 0 });
+      const tex = this.hedgeTexture();
+      return new THREE.MeshStandardMaterial({
+        color: c, map: tex, bumpMap: tex, bumpScale: 0.06, roughness: 0.95, metalness: 0,
+      });
     }
     if (mat === 'glass') {
       // Faintly cyan-tinted, low roughness, ~22% opaque: a unit on the far
       // side must stay clearly readable through it (verified by the E2E
-      // canvas-pixel assertion). No depth write so transparents behind it
-      // (team rings, grid) keep blending correctly.
+      // canvas-pixel assertion — MAP-01 test 8). No depth write so
+      // transparents behind it (team rings, grid) keep blending correctly.
+      // ART-12: the "this is a pane of glass" read now comes from a
+      // procedural pane texture (makeGlassPaneTexture): a dark frame around
+      // every face, a bright keyline at the inner frame edge, a soft
+      // fresnel-style edge glow, and a few faint diagonal reflection
+      // streaks. The pane INTERIOR is exactly the pre-ART-12 look (0xa8dce8
+      // at 0.22 alpha, now carried by the texture's alpha channel instead of
+      // material.opacity), so the see-through assertion is untouched.
       return new THREE.MeshStandardMaterial({
-        color: 0xa8dce8, roughness: 0.08, metalness: 0.1,
-        transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide,
+        color: 0xffffff, map: this.glassTexture(), roughness: 0.08, metalness: 0.1,
+        transparent: true, opacity: 1, depthWrite: false, side: THREE.DoubleSide,
       });
     }
     let color = ENV.wall;
@@ -533,12 +570,14 @@ export class Renderer {
     let emissiveIntensity = 0;
     switch (s.kind) {
       case 'boundary': color = ENV.boundary; break;
-      case 'wall': color = ENV.wall; break;
-      case 'ramp': color = ENV.ramp; break;
-      case 'spawn': color = ENV.spawn; emissive = 0x101018; emissiveIntensity = 0.4; break;
+      case 'wall': color = ENV.wall; break; // ART-12: unreachable in shipped maps (see ENV.wall)
+      case 'ramp': color = ENV.ramp; break; // ART-12: no ramps since MAP-03 (see ENV.ramp)
+      // ART-12: the night-era emissive (0x101018 @ 0.4) was removed with the
+      // colour fix — see the ENV.spawn note above.
+      case 'spawn': color = ENV.spawn; break;
       // The platform is the one building allowed a hue: it is the contested
       // high ground, so it earns a faint cyan glow.
-      case 'platform': color = ENV.platform; emissive = 0x16324f; emissiveIntensity = 0.55; break;
+      case 'platform': color = ENV.platform; emissive = 0x16324f; emissiveIntensity = 0.55; break; // ART-12: no platforms since MAP-03 (see ENV.platform)
     }
     return new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.15, emissive, emissiveIntensity });
   }
@@ -657,6 +696,220 @@ export class Renderer {
     return { base: this.sandCanvas!, mottle: this.sandMottleCanvas! };
   }
 
+  // ---- ART-12: procedural wall textures (hedge foliage + glass pane) ----
+  private hedgeTex: THREE.CanvasTexture | null = null;
+  private hedgeTexCanvases: { base: HTMLCanvasElement; foliage: HTMLCanvasElement } | null = null;
+
+  /** ART-12: the shared hedge foliage texture (built once, deterministic —
+   *  fixed-seed LCG, stable across reloads). */
+  private hedgeTexture(): THREE.CanvasTexture {
+    if (!this.hedgeTex) {
+      const canvases = this.makeHedgeCanvases();
+      this.hedgeTexCanvases = canvases;
+      const tex = new THREE.CanvasTexture(canvases.base);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      this.hedgeTex = tex;
+    }
+    return this.hedgeTex;
+  }
+
+  /** ART-12 E2E hook: the hedge texture's source canvases (unrepeated) so
+   *  the test can check the repeat wrap has no hard seam (same probe shape
+   *  as the ART-07 sand seam test — `foliage` is the wrap-sensitive layer). */
+  getHedgeTextureCanvases(): { base: HTMLCanvasElement; foliage: HTMLCanvasElement } {
+    if (!this.hedgeTexCanvases) this.hedgeTexture();
+    return this.hedgeTexCanvases!;
+  }
+
+  /**
+   * ART-12: procedural hedge foliage — a near-white, SEAM-FREE tile that the
+   * hedge material multiplies by its (per-id jittered) green. The wall must
+   * read as leaf clusters, not noise and not a flat fill:
+   *   1. a near-white base with fine per-pixel grain (near-white on purpose:
+   *      the texture is a MULTIPLIER for the material colour, so its mean
+   *      stays ≈1.0 and the hedge keeps its current lightness — ART-06),
+   *   2. ~14 soft cluster pools of light and shadow (radial falloff),
+   *   3. ~150 small leaves, rotated ellipses with a dark-base -> light-tip
+   *      gradient, in three value bands (shadow / mid / highlight) so the
+   *      clusters carry real 明暗层次 (light/dark layering).
+   * Every wrap-sensitive brush (pools AND leaves) is repainted at the 8
+   * neighbouring tile offsets — the exact ART-07 sand seam trick — so a
+   * brush crossing a tile edge continues on the opposite side and the
+   * repeat has no right-angle seam. `foliage` (pools + leaves on
+   * transparency) is kept as its own layer for the E2E seam probe, exactly
+   * like the sand mottle layer.
+   */
+  private makeHedgeCanvases(): { base: HTMLCanvasElement; foliage: HTMLCanvasElement } {
+    const S = 256;
+    let s = 0x5eed6e12 >>> 0; // fixed seed: deterministic texture
+    const rnd = (): number => {
+      s = (s * 48271) % 2147483647; // Park-Minimal LCG: stable per seed
+      return s / 2147483647;
+    };
+    const base = document.createElement('canvas');
+    base.width = base.height = S;
+    const bctx = base.getContext('2d')!;
+    const img = bctx.createImageData(S, S);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const j = (rnd() - 0.5) * 14; // fine grain, mean 252 (≈ white)
+      img.data[i] = 252 + j;
+      img.data[i + 1] = 253 + j;
+      img.data[i + 2] = 250 + j;
+      img.data[i + 3] = 255;
+    }
+    bctx.putImageData(img, 0, 0);
+    const foliage = document.createElement('canvas');
+    foliage.width = foliage.height = S;
+    const fctx = foliage.getContext('2d')!;
+    // ART-07 seam trick: draw every brush at the 8 neighbouring tile offsets
+    // so anything crossing a tile edge wraps around to the other side.
+    const wrap = (draw: (x: number, y: number) => void, x: number, y: number): void => {
+      for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) draw(x + ox * S, y + oy * S);
+    };
+    // 2) Cluster pools: soft radial light/shadow so the hedge has broad
+    //    volume before the individual leaves are painted on top.
+    for (let i = 0; i < 14; i++) {
+      const x = S * rnd();
+      const y = S * rnd();
+      const r = S * (0.09 + 0.16 * rnd());
+      const dark = rnd() < 0.55;
+      const a = 0.1 + rnd() * 0.14;
+      wrap((px, py) => {
+        const g = fctx.createRadialGradient(px, py, 0, px, py, r);
+        g.addColorStop(0, dark ? `rgba(24,42,26,${a})` : `rgba(255,246,220,${a * 0.9})`);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        fctx.fillStyle = g;
+        fctx.beginPath();
+        fctx.arc(px, py, r, 0, Math.PI * 2);
+        fctx.fill();
+      }, x, y);
+    }
+    // 3) Leaves: three value bands keep the average of the layer high
+    //    (multiplier mean ≈ 0.93), so the wall does not read darker.
+    for (let i = 0; i < 150; i++) {
+      const x = S * rnd();
+      const y = S * rnd();
+      const rot = rnd() * Math.PI;
+      const len = 3.5 + rnd() * 5; // semi-major axis (px)
+      const wid = 1.8 + rnd() * 2.6; // semi-minor axis (px)
+      const roll = rnd();
+      const baseV = roll < 0.4 ? 60 + rnd() * 30 : roll < 0.8 ? 115 + rnd() * 45 : 205 + rnd() * 40;
+      const gV = Math.min(255, baseV + 20 + rnd() * 14); // green slightly lifted
+      const bV = baseV * 0.72 + rnd() * 12;
+      const tip = Math.min(255, baseV * 1.8);
+      wrap((px, py) => {
+        fctx.save();
+        fctx.translate(px, py);
+        fctx.rotate(rot);
+        const g = fctx.createLinearGradient(-len, 0, len, 0);
+        g.addColorStop(0, `rgba(${baseV | 0},${gV | 0},${bV | 0},0.92)`);
+        g.addColorStop(1, `rgba(${tip | 0},${Math.min(255, tip + 10) | 0},${(tip * 0.8) | 0},0.92)`);
+        fctx.fillStyle = g;
+        fctx.beginPath();
+        fctx.ellipse(0, 0, len, wid, 0, 0, Math.PI * 2);
+        fctx.fill();
+        fctx.restore();
+      }, x, y);
+    }
+    bctx.drawImage(foliage, 0, 0);
+    return { base, foliage };
+  }
+
+  private glassTex: THREE.CanvasTexture | null = null;
+
+  /** ART-12: the shared glass pane texture (built once, deterministic).
+   *  Carries the pane's whole look in RGBA: the interior is EXACTLY the
+   *  pre-ART-12 pane (0xa8dce8 at 0.22 alpha) so see-through behaviour is
+   *  unchanged (MAP-01 test 8); on top of that it paints the details that
+   *  make it read as glass — a dark frame around every face, a bright
+   *  keyline at the inner frame edge, a soft fresnel-style glow just inside
+   *  the frame, and a few faint diagonal reflection streaks (wrap-repainted
+   *  at the tile offsets so a streak crossing a tile edge does not clip). */
+  private glassTexture(): THREE.CanvasTexture {
+    if (this.glassTex) return this.glassTex;
+    const S = 256;
+    let s = 0x67145501 >>> 0; // fixed seed: deterministic texture
+    const rnd = (): number => {
+      s = (s * 48271) % 2147483647;
+      return s / 2147483647;
+    };
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    const ctx = cv.getContext('2d')!;
+    // Pane interior: 0xa8dce8 at 22% — the legacy look, alpha-driven now.
+    ctx.fillStyle = 'rgba(168,220,232,0.22)';
+    ctx.fillRect(0, 0, S, S);
+    // Diagonal reflection streaks: soft sheared white bands (the shear keeps
+    // them infinite in Y, so only the X tile offsets need the wrap repaint).
+    for (let i = 0; i < 3; i++) {
+      const cx = S * (0.15 + 0.7 * rnd());
+      const w = S * (0.05 + 0.09 * rnd());
+      const a = 0.05 + rnd() * 0.06;
+      for (let ox = -1; ox <= 1; ox++) {
+        ctx.save();
+        ctx.translate(cx + ox * S, 0);
+        ctx.transform(1, 0, -0.7, 1, 0, 0); // shear: a diagonal band
+        const g = ctx.createLinearGradient(-w, 0, w, 0);
+        g.addColorStop(0, 'rgba(255,255,255,0)');
+        g.addColorStop(0.5, `rgba(255,255,255,${a})`);
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(-w, -S, 2 * w, 3 * S);
+        ctx.restore();
+      }
+    }
+    // Frame around the face: dark border (each box face gets its own frame,
+    // so the whole solid reads as a framed glass structure).
+    const F = 14; // ≈ 5.5% of the face
+    ctx.fillStyle = 'rgba(38,46,56,0.9)';
+    ctx.fillRect(0, 0, S, F);
+    ctx.fillRect(0, S - F, S, F);
+    ctx.fillRect(0, 0, F, S);
+    ctx.fillRect(S - F, 0, F, S);
+    // Bright keyline at the inner frame edge (the pane catching light).
+    ctx.strokeStyle = 'rgba(235,246,250,0.55)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(F + 1, F + 1, S - 2 * F - 2, S - 2 * F - 2);
+    // Fresnel-style edge glow: soft bright band just inside each frame side.
+    const glowW = 26;
+    const glow = (x0: number, y0: number, x1: number, y1: number, rx: number, ry: number, rw: number, rh: number): void => {
+      const g = ctx.createLinearGradient(x0, y0, x1, y1);
+      g.addColorStop(0, 'rgba(255,255,255,0.14)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(rx, ry, rw, rh);
+    };
+    glow(F, F, F, F + glowW, F, F, S - 2 * F, glowW); // top
+    glow(F, S - F - glowW, F, S - F, F, S - F - glowW, S - 2 * F, glowW); // bottom
+    glow(F, F, F + glowW, F, F, F, glowW, S - 2 * F); // left
+    glow(S - F - glowW, F, S - F, F, S - F - glowW, F, glowW, S - 2 * F); // right
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.glassTex = tex;
+    return tex;
+  }
+
+  /** ART-12: scale a fresh BoxGeometry's per-face UVs so one texture tile
+   *  spans `tile` metres on the wall. BoxGeometry maps each face to 0..1
+   *  regardless of size, which would stretch one 3 m leaf tile across a
+   *  34 m wing wall (leaves 6 m long). Texture coordinates only — the box
+   *  shape, collisions and occlusion are untouched. Face order (three.js
+   *  buildPlane calls): px nx py ny pz nz, 4 vertices each. */
+  private scaleBoxUVs(geo: THREE.BoxGeometry, sx: number, sy: number, sz: number, tile: number): void {
+    const uv = geo.attributes.uv as THREE.BufferAttribute;
+    for (let v = 0; v < uv.count; v++) {
+      const face = Math.floor(v / 4);
+      let uScale: number;
+      let vScale: number;
+      if (face < 2) { uScale = sz / tile; vScale = sy / tile; } // ±x: u along Z, v along Y
+      else if (face < 4) { uScale = sx / tile; vScale = sz / tile; } // ±y: u along X, v along Z
+      else { uScale = sx / tile; vScale = sy / tile; } // ±z: u along X, v along Y
+      uv.setXY(v, uv.getX(v) * uScale, uv.getY(v) * vScale);
+    }
+    uv.needsUpdate = true;
+  }
+
   /** The solid boxes of one map (into arenaGroup so setMap can rebuild it). */
   private buildArenaSolids(map: MapData): void {
     // Solids
@@ -664,6 +917,9 @@ export class Renderer {
     for (const s of map.solids) {
       const h = Math.max(0.05, s.top - s.bottom);
       const geo = new THREE.BoxGeometry(s.sx, h, s.sz);
+      // ART-12: hedge foliage repeats every 3 m (its wall height), not once
+      // per face — rescale the texture coordinates (shape/collision intact).
+      if (s.material === 'hedge') this.scaleBoxUVs(geo, s.sx, h, s.sz, 3);
       const mesh = new THREE.Mesh(geo, this.materialFor(s));
       mesh.position.set(s.x, s.bottom + h / 2, s.z);
       this.arenaGroup.add(mesh);
