@@ -35,7 +35,6 @@ const ENV = {
   wall: 0x23272e,
   ramp: 0x2a2f36,
   platform: 0x333a44,
-  cover: 0x3a4048,
   spawn: 0x14181f,
   gridA: 0x2a3038,
   gridB: 0x171b22,
@@ -247,7 +246,6 @@ export class Renderer {
     switch (s.kind) {
       case 'boundary': color = ENV.boundary; break;
       case 'wall': color = ENV.wall; break;
-      case 'cover': color = ENV.cover; break;
       case 'ramp': color = ENV.ramp; break;
       case 'spawn': color = ENV.spawn; emissive = 0x101018; emissiveIntensity = 0.4; break;
       // The platform is the one building allowed a hue: it is the contested

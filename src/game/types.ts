@@ -20,7 +20,10 @@ export function teamColor(t: Team): string {
  *  The same wall can be plain solid, opaque hedge foliage, or transparent glass. */
 export type SolidMaterial = 'solid' | 'hedge' | 'glass';
 
-/** A single axis-aligned solid in the map (wall / cover / platform / ramp / boundary). */
+/** A single axis-aligned solid in the map (wall / platform / ramp / boundary / spawn).
+ *  MAP-03: "cover" is gone — the arena is flat and every inner solid is a full
+ *  3.0m `wall` (single height). 'platform'/'ramp' remain in the union for the
+ *  geometry helpers but no solid currently uses them. */
 export interface Solid {
   id: number;
   /** Center on the XZ plane. */
@@ -32,7 +35,7 @@ export interface Solid {
   /** Vertical range (world Y). */
   bottom: number;
   top: number;
-  kind: 'boundary' | 'wall' | 'cover' | 'platform' | 'ramp' | 'spawn';
+  kind: 'boundary' | 'wall' | 'platform' | 'ramp' | 'spawn';
   /** Material override (MAP-01). Unset = 'solid' (legacy appearance). */
   material?: SolidMaterial;
   /** Ramp axis + which X/Z end is the high end (only for kind === 'ramp'). */
@@ -58,7 +61,7 @@ export interface NavNodeSpec {
   id: number;
   x: number;
   z: number;
-  /** Surface height this node sits on (0 = ground, 1.2 = platform top). */
+  /** Surface height this node sits on (0 = ground). */
   y: number;
 }
 

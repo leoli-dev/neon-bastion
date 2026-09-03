@@ -56,7 +56,7 @@ export function resolveShotFrom(
       sz: box.maxZ - box.minZ,
       bottom: box.minY,
       top: box.maxY,
-      kind: 'cover',
+      kind: 'wall',
     };
     const bHit = raycastAABB(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, synthetic);
     const hc = headCenter(u);

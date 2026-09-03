@@ -223,12 +223,12 @@ test('1: boots, deploys (pointer lock), WASD moves, walls block, arena renders',
 
   // Real render, not a blank/flat screen — measured in PIXELS of the WebGL
   // canvas (the HUD is DOM, so it cannot inflate this number). First move the
-  // player to (5, 16), a position with a clear sight line onto the central
-  // platform (the south column at (0,13) would otherwise block the view from
-  // (0,20)), so the screenshot shows the opening central zone.
+  // player to (5, 16), a position with a clear sight line onto the opening
+  // central zone (the south column at (0,13) would otherwise block the view from
+  // (0,20)), so the screenshot shows the flat central arena.
   await page.evaluate(() => {
     const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
-    t.teleport(0, 5, 16); // facing north (spawn yaw) = straight at the platform
+    t.teleport(0, 5, 16); // facing north (spawn yaw) = straight at the centre
   });
   await page.waitForTimeout(200); // let a few rendered frames present
   const stats = await arenaSceneStats(page);

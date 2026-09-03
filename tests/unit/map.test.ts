@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { NEON_BASTION, coverCount } from '@/game/map/mapData';
+import { NEON_BASTION, coverCount, NEON_BASTION_CENTRAL_NODE } from '@/game/map/mapData';
 import { buildNavGraph, findPath, findNearestNode, getNeighbors } from '@/game/map/navmesh';
 import { isWalkablePath, raycastMap, groundHeight } from '@/game/map/geometry';
 import { isStandable } from '@/game/map/movement';
+import { CONFIG } from '@/game/constants';
 
 const MAP = NEON_BASTION;
 const graph = buildNavGraph(MAP);
@@ -23,8 +24,27 @@ function distinctPaths(a: number, b: number, count = 2): number[][] {
 }
 
 describe('map data (Neon Bastion)', () => {
-  it('has at least 12 usable cover/wall structures', () => {
+  it('has at least 12 full-height wall structures', () => {
     expect(coverCount()).toBeGreaterThanOrEqual(12);
+  });
+
+  it('MAP-03: no half-height obstacle — no solid with top in (0.3, eyeHeight)', () => {
+    // The only sub-eye-height solids ever were the central platform + ramps
+    // (top 1.2). They are gone, so nothing may sit between 0.3m and eye height.
+    for (const s of MAP.solids) {
+      expect(s.top > 0.3 && s.top < CONFIG.eyeHeight, `solid ${s.id} (${s.label}) has a half-height top=${s.top}`).toBe(false);
+    }
+  });
+
+  it('MAP-03: no cover or ramp solids remain (single wall height)', () => {
+    for (const s of MAP.solids) {
+      expect((s.kind as string) === 'cover' || (s.kind as string) === 'ramp', `solid ${s.id} (${s.label}) is kind=${s.kind}`).toBe(false);
+    }
+    // Every inner (non-boundary, non-spawn) solid is a 3.0m wall: one height.
+    const innerTops = new Set(
+      MAP.solids.filter((s) => s.kind === 'wall').map((s) => s.top)
+    );
+    expect(innerTops.has(3)).toBe(true);
   });
 
   it('every spawn point stands on walkable ground', () => {
@@ -77,13 +97,17 @@ describe('map data (Neon Bastion)', () => {
     assert(17, 8, 9, 11);
   });
 
-  it('each team can reach the central platform via the ramps', () => {
-    // The raised platform (elevation feature) is reachable through the ramps.
-    const p1 = findPath(graph, 0, 26);
-    const p2 = findPath(graph, 17, 26);
-    expect(p1).not.toBeNull();
-    expect(p2).not.toBeNull();
-    // Every segment of a computed platform route is genuinely walkable.
+  it('each team can reach the (flat) arena centre; every route segment is walkable', () => {
+    // MAP-03: the raised platform + ramps are gone, so the centre is a ground
+    // node (NEON_BASTION_CENTRAL_NODE) at y=0 reachable directly by both teams.
+    const c = NEON_BASTION_CENTRAL_NODE;
+    const cn = graph.byId.get(c)!;
+    expect(cn.y).toBe(0); // ground, not a raised surface
+    const p1 = findPath(graph, 0, c);
+    const p2 = findPath(graph, 17, c);
+    expect(p1, 'blue should reach the centre').not.toBeNull();
+    expect(p2, 'red should reach the centre').not.toBeNull();
+    // Every segment of a computed centre route is genuinely walkable (flat).
     for (const p of [p1!, p2!]) {
       for (let i = 0; i < p.length - 1; i++) {
         const a = graph.byId.get(p[i])!;
@@ -112,19 +136,24 @@ describe('map data (Neon Bastion)', () => {
     }
   });
 
-  it('spawn can reach the central platform through a climbable ramp (nav chain exists)', () => {
-    // platform-top nodes must be reachable from ground (via the ramps).
-    expect(findPath(graph, 0, 26)).not.toBeNull();
-    expect(findPath(graph, 17, 26)).not.toBeNull();
-    // and the platform-top cluster is internally connected
-    expect(findPath(graph, 24, 25)).not.toBeNull();
+  it('the arena centre is a walkable hub connected into the nav graph', () => {
+    // MAP-03: the centre node is a ground node with real links (no isolated
+    // island where all the action used to funnel through the platform).
+    const c = NEON_BASTION_CENTRAL_NODE;
+    const cn = graph.byId.get(c)!;
+    expect(cn.links.length, 'centre node should have neighbours').toBeGreaterThan(0);
+    expect(findPath(graph, 0, c)).not.toBeNull();
+    expect(findPath(graph, 17, c)).not.toBeNull();
+    // and the centre links out to the south/north lanes
+    expect(findPath(graph, c, 10)).not.toBeNull();
+    expect(findPath(graph, c, 11)).not.toBeNull();
   });
 
   it('findNearestNode returns a nearby same-height node', () => {
     const id = findNearestNode(graph, 0, 9, 0);
     expect(id).toBe(10); // (0,9) is the south main-push node
-    const pid = findNearestNode(graph, 0, 0, 1.2);
-    expect(pid).toBe(26); // (0,0) platform top
+    const cid = findNearestNode(graph, 0, 0, 0);
+    expect(cid).toBe(NEON_BASTION_CENTRAL_NODE); // (0,0) ground centre (MAP-03)
   });
 
   it('keeps characters inside the bounds (boundary walls + clamp)', () => {

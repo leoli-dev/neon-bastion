@@ -17,7 +17,9 @@
 //   * ground height         (a box top / ramp surface is the floor beneath you)
 //   * bullet occlusion      (a ray that hits a box stops there)
 //   * minimap rendering
-// "cover" and "wall" differ only by height — both block fire at eye level.
+// "cover" and "wall" used to differ only by height — both blocked fire at eye
+// level. MAP-03 removed the distinction: the arena is fully flat and every
+// inner solid is a 3.0m `wall` (one single wall height).
 // ============================================================================
 
 import type { MapData, Solid, SpawnPoint, NavNodeSpec } from '../types';
@@ -54,33 +56,25 @@ const solids: Solid[] = [
   s(6, -9, -27, 2, 10, 0, 3, 'spawn', 'red-spawn-l'),
   s(7, 9, -27, 2, 10, 0, 3, 'spawn', 'red-spawn-r'),
 
-  // ---- Central raised platform (the elevation feature) ----
-  s(8, 0, 0, 16, 16, 0, 1.2, 'platform', 'central-platform'),
-  // Ramps up to the platform (smooth slope, climbable from ground level).
-  // West ramp: low end x=-14 (y=0) -> high end x=-8 (y=1.2, meets platform).
-  s(9, -11, 0, 6, 10, 0, 1.2, 'ramp', 'west-ramp', { rampAxis: 'x', rampHighPositive: true }),
-  // East ramp: low end x=14 (y=0) -> high end x=8 (y=1.2, meets platform).
-  s(10, 11, 0, 6, 10, 0, 1.2, 'ramp', 'east-ramp', { rampAxis: 'x', rampHighPositive: false }),
-
   // ---- Side wings (two flanking corridors) ----
   s(11, 16, 0, 2, 34, 0, 3, 'wall', 'east-wing-wall'),
   s(12, -16, 0, 2, 34, 0, 3, 'wall', 'west-wing-wall'),
 
-  // ---- Cover: east wing ----
-  s(13, 22, -8, 4, 4, 0, 2.5, 'cover', 'east-c1'),
-  s(14, 23, 0, 3, 5, 0, 3, 'cover', 'east-c2'),
-  s(15, 22, 8, 4, 4, 0, 2.5, 'cover', 'east-c3'),
-  // ---- Cover: west wing ----
-  s(16, -22, -8, 4, 4, 0, 2.5, 'cover', 'west-c1'),
-  s(17, -23, 0, 3, 5, 0, 3, 'cover', 'west-c2'),
-  s(18, -22, 8, 4, 4, 0, 2.5, 'cover', 'west-c3'),
-  // ---- Cover: central approach (flanks the platform) ----
-  s(19, -13, 11, 4, 4, 0, 2.5, 'cover', 'cover-sw'),
-  s(20, 13, 11, 4, 4, 0, 2.5, 'cover', 'cover-se'),
-  s(21, -13, -11, 4, 4, 0, 2.5, 'cover', 'cover-nw'),
-  s(22, 13, -11, 4, 4, 0, 2.5, 'cover', 'cover-ne'),
-  s(23, 0, 13, 3, 3, 0, 3, 'cover', 'cover-s-col'),
-  s(24, 0, -13, 3, 3, 0, 3, 'cover', 'cover-n-col'),
+  // ---- Walls: east wing (all unified to top=3.0, MAP-03) ----
+  s(13, 22, -8, 4, 4, 0, 3, 'wall', 'east-c1'),
+  s(14, 23, 0, 3, 5, 0, 3, 'wall', 'east-c2'),
+  s(15, 22, 8, 4, 4, 0, 3, 'wall', 'east-c3'),
+  // ---- Walls: west wing ----
+  s(16, -22, -8, 4, 4, 0, 3, 'wall', 'west-c1'),
+  s(17, -23, 0, 3, 5, 0, 3, 'wall', 'west-c2'),
+  s(18, -22, 8, 4, 4, 0, 3, 'wall', 'west-c3'),
+  // ---- Walls: central approach ----
+  s(19, -13, 11, 4, 4, 0, 3, 'wall', 'cover-sw'),
+  s(20, 13, 11, 4, 4, 0, 3, 'wall', 'cover-se'),
+  s(21, -13, -11, 4, 4, 0, 3, 'wall', 'cover-nw'),
+  s(22, 13, -11, 4, 4, 0, 3, 'wall', 'cover-ne'),
+  s(23, 0, 13, 3, 3, 0, 3, 'wall', 'cover-s-col'),
+  s(24, 0, -13, 3, 3, 0, 3, 'wall', 'cover-n-col'),
 
   // ---- Flanking mazes (south-west & south-east baffles with clear lanes) ----
   // MAP-01: manual material overrides for verification only — one hedge and
@@ -132,12 +126,8 @@ const navNodes: NavNodeSpec[] = [
   n(21, -26, 16), // west wing S
   n(22, -26, 0), // west wing M
   n(23, -26, -16), // west wing N
-  // Central platform top (y = 1.2)
-  n(24, -6, 0, 1.2),
-  n(25, 6, 0, 1.2),
-  n(26, 0, 0, 1.2),
-  n(27, 0, -5, 1.2),
-  n(28, 0, 5, 1.2),
+  // Central ground node (the arena is fully flat, MAP-03)
+  n(29, 0, 0), // arena centre (ground)
 ];
 
 export const NEON_BASTION: MapData = {
@@ -148,9 +138,13 @@ export const NEON_BASTION: MapData = {
   navNodes,
 };
 
-/** Count of solids that count as usable cover (boxes / columns / walls for cover). */
+/**
+ * Count of solids that stand as full walls (single height, MAP-03).
+ * "Cover" no longer exists as a distinct kind — every inner solid is a wall,
+ * so the count is simply the number of `wall` solids.
+ */
 export function coverCount(): number {
-  return solids.filter((x) => x.kind === 'cover' || x.kind === 'wall').length;
+  return solids.filter((x) => x.kind === 'wall').length;
 }
 
 /** A few convenience lookups used by tests and the map builder. */
@@ -158,6 +152,6 @@ export function findSolid(id: number): Solid | undefined {
   return solids.find((x) => x.id === id);
 }
 
-export const NEON_BASTION_CENTRAL_NODE = 26; // platform top centre
+export const NEON_BASTION_CENTRAL_NODE = 29; // arena centre (ground)
 export const NEON_BASTION_SOUTH_NODE = 10; // main push node
 export const NEON_BASTION_NORTH_NODE = 11;
