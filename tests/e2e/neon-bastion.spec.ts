@@ -105,6 +105,15 @@ type Hooks = {
     muzzleAtShot: { x: number; y: number; z: number } | null;
     flash: { x: number; y: number; z: number } | null;
   };
+  /** ART-11: show/hide the first-person view model (A/B pixel probes). */
+  viewModelVisible: (v: boolean) => void;
+  /** ART-11: repaint one frame now (main scene + view-model overlay). */
+  renderFrame: () => void;
+  /** ART-11: snap the view model to its full fire-kick pose. */
+  kickViewModel: () => void;
+  /** ART-11: advance the view-model animation by `seconds` (optionally with
+   *  a forced `moveSpeed`) and repaint one frame. */
+  stepViewModel: (seconds: number, moveSpeed?: number) => void;
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   /** AUD-01: how many player footstep triggers have fired since spawn/reseed. */
@@ -1616,6 +1625,211 @@ test('19: ART-10 third-person weapon — raised aim pose on fire, flash at the b
   expect(d, `muzzle flash must sit at the barrel tip (distance ${d})`).toBeLessThan(0.02);
 
   await page.screenshot({ path: 'screenshots/19-weapon.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// ART-11: first-person VIEW MODEL. In the player's own view a cold-metal gun
+// (the SAME makeWeaponMesh() as the third-person units) is pinned to the
+// lower-right of the viewport. It is rendered in an independent scene +
+// camera as a second pass (autoClear=false overlay), so it is never clipped
+// by walls, never fogged, and its brightness cannot flicker with the arena
+// lights. All pixel A/B probes run in ONE evaluate against deterministic
+// re-renders (t.renderFrame) so the throttled headless rAF cannot interleave.
+test('20: ART-11 first-person view model — bottom-right gun, crosshair clear, fire kick, static under reduced motion', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page);
+
+  // --- 1) The gun is IN the bottom-right quadrant: the same frame with the
+  // view model hidden (the pre-change background) differs from it there by a
+  // significant pixel count; the crosshair centre block is untouched. ---
+  const presence = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.start();
+    t.teleport(0, 0, 20); // same vantage as the ART-06 probe: facing the centre
+    const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+    const w = gl.width, h = gl.height;
+    const grab = (x0: number, y0: number, x1: number, y1: number): Uint8ClampedArray => {
+      const c = document.createElement('canvas');
+      c.width = x1 - x0; c.height = y1 - y0;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+      return ctx.getImageData(0, 0, x1 - x0, y1 - y0).data;
+    };
+    const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => {
+      let n = 0;
+      for (let i = 0; i < a.length; i += 4) {
+        const la = 0.2126 * a[i] + 0.7152 * a[i + 1] + 0.0722 * a[i + 2];
+        const lb = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2];
+        if (Math.abs(la - lb) > 12) n++;
+      }
+      return n;
+    };
+    const qx = w >> 1, qy = h >> 1; // bottom-right quadrant
+    const cc = 24; // 48x48 block around the exact crosshair centre
+    const cx = (w / 2) | 0, cy = (h / 2) | 0;
+    t.viewModelVisible(true);
+    t.renderFrame();
+    const qWith = grab(qx, qy, w, h);
+    const cWith = grab(cx - cc, cy - cc, cx + cc, cy + cc);
+    t.viewModelVisible(false);
+    t.renderFrame();
+    const qNo = grab(qx, qy, w, h);
+    const cNo = grab(cx - cc, cy - cc, cx + cc, cy + cc);
+    t.viewModelVisible(true);
+    t.renderFrame();
+    return { quadDiff: diff(qWith, qNo), quadPx: qWith.length / 4, centerDiff: diff(cWith, cNo), centerPx: cWith.length / 4 };
+  });
+  console.log('ART-11 PRESENCE', JSON.stringify(presence));
+  expect(
+    presence.quadDiff,
+    `the bottom-right quadrant must contain the view model (${presence.quadDiff} of ${presence.quadPx} pixels differ from the no-gun frame)`
+  ).toBeGreaterThan(presence.quadPx * 0.01);
+  expect(
+    presence.centerDiff,
+    'the crosshair centre block must NOT be touched by the view model'
+  ).toBeLessThanOrEqual(0); // frames are otherwise pixel-identical
+
+  await page.screenshot({ path: 'screenshots/20-viewmodel.png' });
+
+  // --- 2) Walking sway (normal motion): advancing the view-model animation
+  // with a forced walking speed moves the gun slightly between two frames. ---
+  const sway = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+    const w = gl.width, h = gl.height;
+    const grab = (x0: number, y0: number, x1: number, y1: number): Uint8ClampedArray => {
+      const c = document.createElement('canvas');
+      c.width = x1 - x0; c.height = y1 - y0;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+      return ctx.getImageData(0, 0, x1 - x0, y1 - y0).data;
+    };
+    const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => {
+      let n = 0;
+      for (let i = 0; i < a.length; i += 4) {
+        const la = 0.2126 * a[i] + 0.7152 * a[i + 1] + 0.0722 * a[i + 2];
+        const lb = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2];
+        if (Math.abs(la - lb) > 12) n++;
+      }
+      return n;
+    };
+    t.renderFrame();
+    const a = grab(w >> 1, h >> 1, w, h);
+    t.stepViewModel(0.5, 5.0); // walk at 5 u/s for 0.5 s (forced speed)
+    const b = grab(w >> 1, h >> 1, w, h);
+    return { diff: diff(a, b), px: a.length / 4 };
+  });
+  console.log('ART-11 SWAY', JSON.stringify(sway));
+  expect(
+    sway.diff,
+    `walking must sway the view model (only ${sway.diff} pixels changed after 0.5 s of walking)`
+  ).toBeGreaterThan(sway.px * 0.002);
+
+  // --- 3) Fire kick: two consecutive frames (rest pose -> full kick pose)
+  // differ significantly in the bottom-right quadrant. The kick COMPLEMENTS
+  // the CONFIG.shotKick camera recoil — the gun retreats + muzzle up. ---
+  const kick = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+    const w = gl.width, h = gl.height;
+    const grab = (x0: number, y0: number, x1: number, y1: number): Uint8ClampedArray => {
+      const c = document.createElement('canvas');
+      c.width = x1 - x0; c.height = y1 - y0;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+      return ctx.getImageData(0, 0, x1 - x0, y1 - y0).data;
+    };
+    const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => {
+      let n = 0;
+      for (let i = 0; i < a.length; i += 4) {
+        const la = 0.2126 * a[i] + 0.7152 * a[i + 1] + 0.0722 * a[i + 2];
+        const lb = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2];
+        if (Math.abs(la - lb) > 12) n++;
+      }
+      return n;
+    };
+    t.renderFrame();
+    const a = grab(w >> 1, h >> 1, w, h);
+    t.kickViewModel(); // the same snap a player 'shot' event applies
+    t.renderFrame();
+    const b = grab(w >> 1, h >> 1, w, h);
+    return { diff: diff(a, b), px: a.length / 4 };
+  });
+  console.log('ART-11 FIRE KICK', JSON.stringify(kick));
+  expect(
+    kick.diff,
+    `firing must displace the view model (only ${kick.diff} pixels changed between the two frames)`
+  ).toBeGreaterThan(kick.px * 0.002);
+
+  // --- 4) Reduced motion: the gun stays on screen, but standing/walking
+  // still shows NO sway (frames identical) while a MINIMAL fire feedback is
+  // kept. ---
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await ready(page);
+  await pinSeed(page);
+  const rm = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.start();
+    t.teleport(0, 0, 20);
+    const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+    const w = gl.width, h = gl.height;
+    const grab = (x0: number, y0: number, x1: number, y1: number): Uint8ClampedArray => {
+      const c = document.createElement('canvas');
+      c.width = x1 - x0; c.height = y1 - y0;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, x0, y0, x1 - x0, y1 - y0, 0, 0, x1 - x0, y1 - y0);
+      return ctx.getImageData(0, 0, x1 - x0, y1 - y0).data;
+    };
+    const diff = (a: Uint8ClampedArray, b: Uint8ClampedArray): number => {
+      let n = 0;
+      for (let i = 0; i < a.length; i += 4) {
+        const la = 0.2126 * a[i] + 0.7152 * a[i + 1] + 0.0722 * a[i + 2];
+        const lb = 0.2126 * b[i] + 0.7152 * b[i + 1] + 0.0722 * b[i + 2];
+        if (Math.abs(la - lb) > 12) n++;
+      }
+      return n;
+    };
+    const q = (): Uint8ClampedArray => grab(w >> 1, h >> 1, w, h);
+    // The gun is still THERE under reduced motion (same A/B as part 1).
+    t.viewModelVisible(true);
+    t.renderFrame();
+    const withGun = q();
+    t.viewModelVisible(false);
+    t.renderFrame();
+    const noGun = q();
+    t.viewModelVisible(true);
+    t.renderFrame();
+    const a = q();
+    t.stepViewModel(2.0, 5.0); // 2 s of walking — no sway allowed
+    const b = q();
+    const c = q(); // rest pose again for the fire check
+    t.kickViewModel();
+    t.renderFrame();
+    const d = q();
+    return {
+      presenceDiff: diff(withGun, noGun),
+      staticDiff: diff(a, b),
+      kickDiff: diff(c, d),
+      px: a.length / 4,
+    };
+  });
+  console.log('ART-11 REDUCED MOTION', JSON.stringify(rm));
+  expect(
+    rm.presenceDiff,
+    'reduced motion: the view model must still be present in the bottom-right quadrant'
+  ).toBeGreaterThan(rm.px * 0.01);
+  expect(
+    rm.staticDiff,
+    `reduced motion: no walk sway when standing still (only ${rm.staticDiff} pixels changed after 2 s)`
+  ).toBeLessThan(rm.px * 0.001);
+  expect(
+    rm.kickDiff,
+    'reduced motion: a minimal fire-kick feedback is kept'
+  ).toBeGreaterThan(rm.px * 0.001);
+
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

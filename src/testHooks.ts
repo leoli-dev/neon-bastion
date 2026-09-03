@@ -67,6 +67,19 @@ export interface TeamArenaTestHooks {
     muzzleAtShot: { x: number; y: number; z: number } | null;
     flash: { x: number; y: number; z: number } | null;
   };
+  /** ART-11: show/hide the first-person view model (A/B pixel probes of the
+   *  bottom-right quadrant vs the same frame without the gun). */
+  viewModelVisible: (v: boolean) => void;
+  /** ART-11: repaint one frame NOW (main scene + view-model overlay) at the
+   *  current camera/state — deterministic pixel probes (no rAF race). */
+  renderFrame: () => void;
+  /** ART-11: snap the view model to its full fire-kick pose (what a player
+   *  shot does) so a following renderFrame shows the recoil displacement. */
+  kickViewModel: () => void;
+  /** ART-11: deterministically advance the view-model animation by `seconds`
+   *  (optionally forcing a `moveSpeed` so the walk sway is exercised without
+   *  moving the sim) and repaint one frame. */
+  stepViewModel: (seconds: number, moveSpeed?: number) => void;
   /** FX-04: with one in-flight bullet flying straight AT the probe camera
    *  (~5.6 units away, 2.5 units off-axis so the trail is seen obliquely),
    *  how many warm-gold (0xffe08a family) pixels does one rendered frame
@@ -120,6 +133,10 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     sandTextureCanvases: () => app.renderer.getSandTextureCanvases(),
     unitVisualBounds: () => app.renderer.unitVisualBounds(),
     weaponState: (unitId) => app.weaponProbe(unitId),
+    viewModelVisible: (v) => app.renderer.setViewModelVisible(v),
+    renderFrame: () => app.renderer.renderFrame(),
+    kickViewModel: () => app.renderer.triggerViewModelShot(),
+    stepViewModel: (seconds, moveSpeed) => app.renderer.stepViewModel(app.match, seconds, moveSpeed),
     probeTrailWarmGold: () => {
       // FX-04: one in-flight bullet ~5.6 units from the probe camera pose
       // (camera at (0,4,12), view axis u = (0, 0.939693, -0.342020) = 70° up),

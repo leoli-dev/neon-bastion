@@ -29,6 +29,27 @@ import {
   WEAPON_FIRING_WINDOW, WEAPON_PIVOT_Y, WEAPON_RECOIL_TRAVEL, WEAPON_REST_PITCH,
 } from './weapon';
 
+// ART-11: first-person VIEW MODEL (the gun in the player's own screen,
+// bottom-right). Rendered in its OWN scene + camera as a second pass
+// (renderer.autoClear = false + clearDepth) on top of the main frame:
+//   * NOT in the main scene -> never depth-clipped by walls, never fogged,
+//   * lit by constant "studio" lights -> its brightness cannot flicker as the
+//     player moves through the arena's sun/point lights,
+//   * camera-space pose -> it is pinned to the lower-right of the viewport.
+// The geometry is the SAME shared makeWeaponMesh() as the third-person units
+// (task 5) — one gun model, two renderings.
+const VM_FOV = 38; // narrow lens: the gun reads compact, not wide-angle warped
+const VM_BASE = { x: 0.18, y: -0.17, z: -0.55 }; // grip anchor, bottom-right
+const VM_YAW = Math.PI - 0.35; // barrel points away (camera looks -Z) + right
+const VM_PITCH = -0.35; // muzzle up ~20° (negative x = raised, see weapon.ts)
+const VM_BOB_FREQ = 9; // = CONFIG.bobFrequency: same cadence as the sprint bob
+const VM_BOB_AMP_Y = 0.010; // metres — subtle (the camera bob is 0.05)
+const VM_BOB_AMP_X = 0.006;
+const VM_RECOIL_PITCH = 0.26; // barrel snaps UP on fire (rad, decays)
+const VM_RECOIL_TRAVEL = 0.07; // gun pulls BACK toward the shoulder (m, decays)
+const VM_SPRINT_DROP = 0.028; // sprint: gun tucked slightly down…
+const VM_SPRINT_ROLL = 0.12; // …and leaned (roll), like real hip-fire tuck
+
 // Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
 // wheel, both fully saturated, sitting on a desaturated ~210°/8% environment.
 const BLUE = { body: 0x18e0ff, head: 0xb8f6ff, emissive: 0x0a6e8c, ring: 0x18e0ff };
@@ -230,6 +251,17 @@ export class Renderer {
   private fovCurrent = CONFIG.fovBase;
   private bobPhase = 0;
   private bobAmp = 0;
+  // ART-11: view-model state (independent scene; see buildViewModel).
+  private vmScene!: THREE.Scene;
+  private vmCamera!: THREE.PerspectiveCamera;
+  private vmRoot!: THREE.Group; // walk sway + sprint tuck (screen-anchored)
+  private vmPivot!: THREE.Group; // recoil (muzzle up + pull back)
+  private vmVisible = true; // E2E probe can hide it to A/B the pixels
+  private fpvAlive = false; // camera is in the player's eyes -> view model on
+  private vmRecoil = 0;
+  private vmBobPhase = 0;
+  private vmBobAmp = 0; // eased 0..1 walk-sway gate
+  private vmSprint = 0; // eased 0..1 sprint-tuck gate
   // Camera kick (on being hit) and firing recoil: offsets applied on top of
   // the player's pitch/yaw, each decaying back to zero on its own.
   private kickYaw = 0;
@@ -279,6 +311,7 @@ export class Renderer {
     this.trailGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 8, 1, false);
 
     this.buildLights();
+    this.buildViewModel();
     this.arenaGroup = new THREE.Group();
     this.scene.add(this.arenaGroup);
     this.buildArena(map);
@@ -1118,7 +1151,10 @@ export class Renderer {
     this.updateClouds(dt);
 
     this.drawMinimap(match);
-    this.renderer.render(this.scene, this.camera);
+    // ART-11: advance the first-person view model, then draw the main scene
+    // plus the view-model overlay pass in one frame.
+    this.updateViewModel(match, dt);
+    this.renderFrame();
   }
 
   /**
@@ -1291,6 +1327,110 @@ export class Renderer {
     };
   }
 
+  // ------------------------------------------------------- ART-11 view model
+  /** ART-11: build the first-person view model in an INDEPENDENT scene.
+   *  Same shared makeWeaponMesh() geometry/materials as the third-person
+   *  units (one gun model), but lit by constant studio lights: no fog, no
+   *  arena lights, no depth against the world — so the gun is always the
+   *  same brightness and is never sliced by a nearby wall. */
+  private buildViewModel(): void {
+    this.vmScene = new THREE.Scene(); // no background, no fog: overlays the main pass
+    this.vmScene.add(new THREE.HemisphereLight(0xe8f2ff, 0xbfb49a, 1.35));
+    const key = new THREE.DirectionalLight(0xfff6e6, 2.0);
+    key.position.set(1.5, 2.5, 1.5);
+    this.vmScene.add(key);
+    this.vmScene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+    this.vmCamera = new THREE.PerspectiveCamera(VM_FOV, this.camera.aspect, 0.05, 8);
+    this.vmPivot = new THREE.Group(); // recoil transform
+    this.vmPivot.rotation.order = 'YXZ';
+    this.vmPivot.add(makeWeaponMesh().group); // SHARED geometry with the units
+    this.vmRoot = new THREE.Group(); // sway/tuck transform
+    this.vmRoot.add(this.vmPivot);
+    this.vmScene.add(this.vmRoot);
+    this.applyViewModelPose();
+  }
+
+  /** Recompose the view-model transforms from the current animation state
+   *  (sway, sprint tuck, recoil). Pure transform math — shared by the live
+   *  loop, the fire snap and the deterministic E2E step hook. */
+  private applyViewModelPose(): void {
+    // Reduced motion: sway and sprint tuck are OFF, but the gun keeps a
+    // minimal (halved) fire-kick as feedback — the weapon body itself is
+    // always on screen.
+    const kick = this.vmRecoil * (this.reducedMotion ? 0.5 : 1);
+    const bobY = Math.sin(this.vmBobPhase) * VM_BOB_AMP_Y * this.vmBobAmp;
+    const bobX = Math.cos(this.vmBobPhase * 2) * VM_BOB_AMP_X * this.vmBobAmp;
+    this.vmRoot.position.set(
+      VM_BASE.x + bobX,
+      VM_BASE.y + bobY - VM_SPRINT_DROP * this.vmSprint,
+      VM_BASE.z,
+    );
+    this.vmRoot.rotation.z = VM_SPRINT_ROLL * this.vmSprint;
+    this.vmPivot.rotation.y = VM_YAW;
+    this.vmPivot.rotation.x = VM_PITCH - VM_RECOIL_PITCH * kick; // muzzle up
+    this.vmPivot.position.z = VM_RECOIL_TRAVEL * kick; // pulled back toward the shoulder
+  }
+
+  /** ART-11: advance the view-model animation by one frame (pure render
+   *  state). The sway phase is driven the same way the sprint head-bob is
+   *  (fixed frequency, eased amplitude gate) but at a much smaller scale;
+   *  `moveSpeed` lets the deterministic E2E hook force a walking speed. */
+  private updateViewModel(match: Match, dt: number, moveSpeed?: number): void {
+    const p = match.player;
+    const speed = moveSpeed ?? Math.hypot(p.vel.x, p.vel.z);
+    const moving = p.grounded && speed > 0.5;
+    const sprinting = moving && speed > (CONFIG.walkSpeed + CONFIG.sprintSpeed) / 2;
+    if (this.reducedMotion) {
+      // Reduced motion: no sway, no tuck — only the minimal fire kick stays.
+      this.vmBobAmp += (0 - this.vmBobAmp) * Math.min(1, dt * 10);
+      this.vmSprint += (0 - this.vmSprint) * Math.min(1, dt * 6);
+    } else {
+      if (moving) this.vmBobPhase += dt * VM_BOB_FREQ * (sprinting ? 1.4 : 1);
+      this.vmBobAmp += ((moving ? 1 : 0) - this.vmBobAmp) * Math.min(1, dt * 10);
+      this.vmSprint += ((sprinting ? 1 : 0) - this.vmSprint) * Math.min(1, dt * 6);
+    }
+    this.vmRecoil *= Math.exp(-dt * 9); // half-life ~77 ms: snap home fast
+    if (this.vmRecoil < 0.004) this.vmRecoil = 0;
+    this.applyViewModelPose();
+  }
+
+  /** ART-11: player fired — the view model kicks (muzzle up + pull back)
+   *  and snaps back fast. This COMPLEMENTS the CONFIG.shotKick camera recoil
+   *  (the view tilts up while the gun retreats) — the two are different
+   *  channels, not the same effect twice. */
+  triggerViewModelShot(): void {
+    this.vmRecoil = 1;
+    this.applyViewModelPose(); // snap: a synchronous re-render shows full kick
+  }
+
+  /** ART-11 E2E hook: deterministically advance the view-model animation by
+   *  `seconds` (optionally forcing a `moveSpeed` so the sway is exercised
+   *  without racing the live sim) and repaint one frame. */
+  stepViewModel(match: Match, seconds: number, moveSpeed?: number): void {
+    this.updateViewModel(match, seconds, moveSpeed);
+    this.renderFrame();
+  }
+
+  /** ART-11 E2E hook: show/hide the view model (A/B the bottom-right
+   *  quadrant against the same frame without the gun). */
+  setViewModelVisible(v: boolean): void {
+    this.vmVisible = v;
+  }
+
+  /** Main scene + view-model overlay pass. The view model is drawn with
+   *  autoClear=false on top of the main frame (fresh depth only), so it is
+   *  the last thing on screen — behind only the DOM HUD. */
+  renderFrame(): void {
+    this.renderer.render(this.scene, this.camera);
+    if (this.vmVisible && this.fpvAlive) {
+      this.renderer.autoClear = false;
+      this.renderer.clearDepth();
+      this.renderer.render(this.vmScene, this.vmCamera);
+      this.renderer.autoClear = true;
+    }
+  }
+
   /** Number of live effects — feeds the debug panel's "active particles". */
   getStats(): { activeParticles: number; activeTracers: number } {
     let tracers = 0;
@@ -1333,6 +1473,7 @@ export class Renderer {
 
     const p = match.player;
     const mode = match.spectate.mode;
+    this.fpvAlive = mode === 'alive' && p.alive; // view model only in FPV
     if (mode === 'alive' && p.alive) {
       const eye = eyeOf(p);
       // Effective view angles = the player's own aim + recoil pitch-up +
@@ -1657,6 +1798,9 @@ export class Renderer {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    // ART-11: the view-model camera tracks the viewport aspect too.
+    this.vmCamera.aspect = w / h;
+    this.vmCamera.updateProjectionMatrix();
   }
 
   dispose(): void {

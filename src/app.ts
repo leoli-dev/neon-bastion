@@ -333,6 +333,10 @@ export class App {
         // Firing recoil: each shot kicks the view up by CONFIG.shotKick;
         // the renderer eases it back once the trigger is released.
         this.renderer.addRecoil(CONFIG.shotKick);
+        // ART-11: the first-person view model kicks too (muzzle up + pull
+        // back) — a SECOND channel alongside the camera pitch kick, so the
+        // camera rises while the gun retreats (they complement, not repeat).
+        this.renderer.triggerViewModelShot();
       }
     } else if (e.type === 'impact') {
       // ARRIVAL: the bullet landed. Sparks, hitmarker and damage numbers are
