@@ -2099,6 +2099,9 @@ test('24: ART-12 spawn wall — daylight-toned, not the night-era near-black', a
 //   - look-up cloud-band fraction (L>170 and B-R<30): 0.0000 -> 0.118
 //   - ground-hugging patch luma std (120×30 px):       3.87   -> 7.03
 // and the ART-06 five metrics all stay in their original ranges.
+//   9. UI-03 favicon: link[rel=icon] present, non-empty href that is not a
+//      404 (inline data URIs: assert scheme + length), theme-color +
+//      apple-touch-icon declared.
 test('25: ART-13 cloud band is visible, sky keeps its balance, ground has close-range detail', async ({ page }) => {
   const errors = trackErrors(page);
   await ready(page);
@@ -2229,3 +2232,68 @@ test('25: ART-13 cloud band is visible, sky keeps its balance, ground has close-
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });
+
+// ---------------------------------------------------------------------------
+// UI-03: favicon. index.html declares an inline SVG data-URI icon (no
+// external asset), a theme-color meta and an apple-touch-icon link. This test
+// verifies the built page actually carries them: if the href were a real path
+// (404 in dist/) the fetch check would fail; for inline data URIs we assert
+// the scheme and a sane payload length instead.
+test('26: UI-03 favicon + theme-color + apple-touch-icon are declared and resolvable', async ({ page }) => {
+  await ready(page);
+
+  // 1) link[rel="icon"] exists with a non-empty href.
+  const icon = page.locator('link[rel="icon"]').first();
+  await expect(icon).toHaveCount(1);
+  const iconHref = (await icon.getAttribute('href')) ?? '';
+  expect(iconHref.length, 'favicon href must be non-empty').toBeGreaterThan(0);
+
+  // 2) Not a 404: inline data URIs are asserted by scheme + length; any
+  //    real URL is fetched and must resolve.
+  if (iconHref.startsWith('data:')) {
+    expect(
+      iconHref.startsWith('data:image/svg+xml,'),
+      `inline favicon must be an SVG data URI — got: ${iconHref.slice(0, 40)}...`
+    ).toBe(true);
+    const payload = iconHref.slice(iconHref.indexOf(',') + 1);
+    expect(
+      atobSafeLen(payload),
+      'favicon data URI payload must be a real SVG (≥ 100 decoded bytes), not a stub'
+    ).toBeGreaterThanOrEqual(100);
+  } else {
+    const res = await page.request.get(iconHref);
+    expect(res.status(), `favicon href ${iconHref} must not 404`).toBe(200);
+  }
+
+  // 3) theme-color meta with a usable colour value.
+  const themeColor = (await page.locator('meta[name="theme-color"]').getAttribute('content')) ?? '';
+  expect(
+    /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(themeColor.trim()),
+    `theme-color content must be a hex colour — got "${themeColor}"`
+  ).toBe(true);
+
+  // 4) apple-touch-icon declared with a non-empty, resolvable href.
+  const apple = page.locator('link[rel="apple-touch-icon"]').first();
+  await expect(apple).toHaveCount(1);
+  const appleHref = (await apple.getAttribute('href')) ?? '';
+  expect(appleHref.length, 'apple-touch-icon href must be non-empty').toBeGreaterThan(0);
+  if (appleHref.startsWith('data:')) {
+    expect(appleHref.length, 'inline apple-touch-icon must carry a real payload').toBeGreaterThan(50);
+  } else {
+    const res = await page.request.get(appleHref);
+    expect(res.status(), `apple-touch-icon href ${appleHref} must not 404`).toBe(200);
+  }
+
+  // 5) <title> still sensible (non-empty, still names the game).
+  const title = await page.title();
+  expect(title.length, 'document title must be non-empty').toBeGreaterThan(0);
+  expect(title, 'document title should still name the game').toMatch(/neon bastion/i);
+});
+
+/** Decoded byte length of a (url-encoded) data-URI payload without throwing
+ *  on percent-escapes: decode the %XX sequences first, then measure the
+ *  UTF-8 byte length of the decoded string. */
+function atobSafeLen(payload: string): number {
+  const decoded = decodeURIComponent(payload);
+  return new TextEncoder().encode(decoded).length;
+}

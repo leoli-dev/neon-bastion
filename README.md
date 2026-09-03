@@ -65,6 +65,12 @@ lock, which the browser requires a user gesture for).
   150 BPM A/B combat BGM with a synthesized kick/snare/hat skeleton — `M` toggles
   the loop, SFX always stay louder); no assets.
 - **No backend** — the whole match runs client-side; "restart" just reseeds the RNG.
+- **Favicon (UI-03)** — the page declares `link[rel=icon]`, `apple-touch-icon` and
+  `theme-color`, all inline in `index.html`: the icon is an SVG data URI (a blue-team
+  `#18e0ff` crosshair ticks + red-team `#ff3d63` core on the dark background — simple
+  enough to read at 16×16), so there are no external `.ico`/`.png` assets and nothing
+  for the build to rewrite or 404. An E2E test asserts the icon href is non-empty and
+  resolvable (scheme + payload length for the inline URI), and that `theme-color` / `apple-touch-icon` are present.
 
 ## What changed in this pass
 
