@@ -242,9 +242,27 @@ export function isWalkablePath(
   return true;
 }
 
+/** Options for line queries (MAP-02). */
+export interface LineQueryOptions {
+  /**
+   * Whether glass is transparent to this line. Sight lines (AI vision, cover
+   * checks) default to `true` — you can SEE through glass. Ballistic lines
+   * (pre-shot fire check) must pass `false` — bullets are STOPPED by glass,
+   * so the AI must never fire across it. `raycastMap()` itself is left
+   * unchanged and always treats glass as opaque.
+   */
+  throughGlass?: boolean;
+}
+
 /**
  * Horizontal line-of-sight (for AI perception / nav). Checks at `height` so a
  * 1.2m platform does not block a 1.6m sight-line, while 2.5m+ cover does.
+ *
+ * MAP-02: sight lines pass THROUGH glass by default (`throughGlass` true)
+ * while ballistic queries (`throughGlass: false`) are blocked by it, so
+ * "can see" and "can hit" are no longer the same test. The ray here is a
+ * straight A→B segment (same math as `raycastMap` over a filtered solid set),
+ * so both variants stay exact.
  */
 export function losClear(
   solids: readonly Solid[],
@@ -255,7 +273,8 @@ export function losClear(
   bz: number,
   by: number,
   height: number,
-  maxDist?: number
+  maxDist?: number,
+  opts?: LineQueryOptions
 ): boolean {
   const dx = bx - ax;
   const dy = by - ay;
@@ -266,12 +285,44 @@ export function losClear(
   const ddy = dy / len;
   const ddz = dz / len;
   const md = maxDist ?? len;
-  const hit = raycastMap(solids, ax, ay, az, ddx, ddy, ddz, md);
-  if (hit) {
-    // A solid blocks sight if it is tall enough to intersect the sight line
-    // at the sampled height. raycastMap already accounts for the box extents,
-    // so any hit means occlusion.
-    return false;
+  const throughGlass = opts?.throughGlass !== false;
+  for (let i = 0; i < solids.length; i++) {
+    const s = solids[i];
+    if (throughGlass && s.material === 'glass') continue;
+    const hit = raycastAABB(ax, ay, az, ddx, ddy, ddz, s);
+    if (hit && hit.t >= 0 && hit.t < md) {
+      // A solid blocks the line if it is tall enough to intersect the sight
+      // line at the sampled height. raycastAABB accounts for the box extents,
+      // so any hit means occlusion.
+      return false;
+    }
   }
   return true;
+}
+
+/**
+ * Ballistic line of fire (MAP-02): the straight eye→target segment as a
+ * PROJECTILE would travel it — glass blocks, everything else blocks.
+ * Opposite of the sight-line default: `losClear` (see above) lets you see
+ * through glass; this check must fail when a glass wall stands between the
+ * eyes and the target's torso, so the AI repositions instead of firing into
+ * glass. Reuses `losClear` with `throughGlass: false`.
+ */
+export function lineOfFireClear(
+  solids: readonly Solid[],
+  ax: number,
+  ay: number,
+  az: number,
+  bx: number,
+  by: number,
+  bz: number
+): boolean {
+  return losClear(
+    solids,
+    ax, az, ay,
+    bx, bz, by,
+    1.0,
+    undefined,
+    { throughGlass: false }
+  );
 }

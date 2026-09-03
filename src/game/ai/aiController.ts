@@ -13,7 +13,7 @@
 import type { Unit, Vec3, AIState, MapData, Solid } from '../types';
 import { CONFIG } from '../constants';
 import { RNG, hashSeed } from '../rng';
-import { losClear } from '../map/geometry';
+import { losClear, lineOfFireClear } from '../map/geometry';
 import { stepUnit } from '../map/movement';
 import { findPath, findNearestNode, type NavGraph } from '../map/navmesh';
 import { eyeOf, type FireResult } from '../combat/hitscan';
@@ -195,8 +195,58 @@ function retreatMove(unit: Unit, b: AIState, threat: Unit | null, solids: readon
   return { vx: 0, vz: 0 };
 }
 
+/**
+ * Ballistic line of fire: eyes → target torso, with glass COUNTED as blocking
+ * (MAP-02). Sight lines (canSee) pass through glass; this one does not, so
+ * an AI that can SEE a target through glass will hold its fire until it has
+ * an unobstructed shot line instead of emptying rounds into the pane.
+ */
+function hasLineOfFire(solids: readonly Solid[], shooter: Unit, target: Unit): boolean {
+  const eye = eyeOf(shooter);
+  return lineOfFireClear(
+    solids,
+    eye.x, eye.y, eye.z,
+    target.pos.x, target.pos.y + 0.9, target.pos.z
+  );
+}
+
+/**
+ * MAP-02: the target is visible but a glass wall blocks the shot — route to a
+ * nav node that has a clean ballistic line on the target (glass counts),
+ * i.e. "get to a position where I can actually hit". Falls back to the
+ * normal engage motion if no such node exists.
+ */
+function clearShotMove(unit: Unit, b: AIState, target: Unit, solids: readonly Solid[], graph: NavGraph, now: number): { vx: number; vz: number } {
+  let best = -1;
+  let bestScore = Infinity;
+  for (const n of graph.nodes) {
+    if (Math.abs(n.y) > 0.15) continue;
+    const dMe = Math.hypot(n.x - unit.pos.x, n.z - unit.pos.z);
+    if (dMe < 3) continue;
+    if (!lineOfFireClear(solids, n.x, n.y + CONFIG.eyeHeight, n.z, target.pos.x, target.pos.y + 0.9, target.pos.z)) continue;
+    const dTarget = Math.hypot(target.pos.x - n.x, target.pos.z - n.z);
+    const score = dMe + dTarget * 0.5;
+    if (score < bestScore) {
+      bestScore = score;
+      best = n.id;
+    }
+  }
+  if (best >= 0) {
+    if (b.pathIndex >= b.path.length || b.path[b.pathIndex] !== best) {
+      setPath(unit, b, graph, best);
+    }
+    return followPath(unit, b, graph);
+  }
+  return engageMove(unit, b, target, now);
+}
+
 function doShoot(unit: Unit, ctx: MatchContext, now: number, target: Unit): void {
   const b = unit.ai!;
+  // MAP-02: pre-fire ballistic check. canSee() intentionally passes through
+  // glass, but bullets do not — if the eye→torso segment is blocked (e.g. by
+  // a glass wall) hold fire and let the controller reposition, instead of
+  // firing one round per second into glass forever.
+  if (!hasLineOfFire(ctx.solids, unit, target)) return;
   // One shot per second, same cadence as the player: fire a single round the
   // moment the cooldown elapses while a target is still in sight. There is no
   // burst — at 1 rps a "burst" would just be a sustained 1/s fire.
@@ -345,8 +395,11 @@ export function aiThink(unit: Unit, ctx: MatchContext): void {
         break;
       }
       aimTarget = targetUnit;
-      if (now >= b.reactUntil) wantShoot = true;
-      const m = engageMove(unit, b, targetUnit!, now);
+      // MAP-02: firing is gated on a real ballistic line of fire, not just on
+      // sight. Seen through glass but not hittable? Move to a clear position.
+      const clearShot = hasLineOfFire(solids, unit, targetUnit!);
+      if (now >= b.reactUntil && clearShot) wantShoot = true;
+      const m = clearShot ? engageMove(unit, b, targetUnit!, now) : clearShotMove(unit, b, targetUnit!, solids, graph, now);
       vx = m.vx;
       vz = m.vz;
       break;
