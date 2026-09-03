@@ -8,8 +8,11 @@
 // and *hit feedback*. The arena itself is built from lightness steps in a
 // near-neutral grey so a bright cyan or magenta silhouette always reads as "a
 // unit". Blue team is pushed to cyan to separate it from the cool concrete;
-// red team is a hot magenta-red. Warm sodium lamps + an ACES tonemap give the
-// scene layered, cinematic darkness instead of a flat grey.
+// red team is a hot magenta-red. ART-06 moved the scene to DAYLIGHT: a warm
+// sandy ground gives the frame a bright background, a directional sun +
+// sky-coloured hemisphere light do the illumination, and the ACES tonemap now
+// works on a scene that actually has highlights instead of masking a black
+// arena.
 
 import * as THREE from 'three';
 import type { Match } from '../game/match';
@@ -33,15 +36,16 @@ const ENV = {
   // colour so far geometry fades into the sky instead of a black void.
   skyZenith: 0x1c4f9e,
   skyHorizon: 0xbcd9f2,
-  ground: 0x0a0d13,
+  // ART-06: warm daylight sand — the bright background the dark night-lit
+  // build never had. Grain/brightness perturbation is painted into a
+  // procedural texture (see makeSandTexture) so the floor is not a flat fill.
+  ground: 0xd9c08a,
   boundary: 0x0e1013,
   // ART-03: raised from 0x1a1d22 (~11% lightness, unreadable in real play).
   wall: 0x23272e,
   ramp: 0x2a2f36,
   platform: 0x333a44,
   spawn: 0x14181f,
-  gridA: 0x2a3038,
-  gridB: 0x171b22,
   edgeNeutral: 0x2a3a5a,
   edgePlatform: 0x3fa9ff,
 };
@@ -121,12 +125,13 @@ export class Renderer {
     this.map = map;
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    // ACES filmic tonemap + sRGB output: the single biggest reason the previous
-    // build read as a "flat grey dark" instead of a "layered dark".
-    // ART-03: exposure raised 1.15 -> 1.5 — the palette's lightness steps alone
-    // did not set a brightness floor, so real play was unreadably dark.
+    // ACES filmic tonemap + sRGB output: compresses the daylight range without
+    // clipping the sunlit sand or the sky highlights.
+    // ART-06: exposure REBALANCED 1.5 -> 1.0. The 1.5 was stacked on top to
+    // rescue an otherwise near-black scene (ART-03); now that the ground is
+    // bright sand lit by a sun, 1.5 would blow the frame out.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.5;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     this.scene = new THREE.Scene();
@@ -312,32 +317,20 @@ export class Renderer {
   }
 
   private buildLights(): void {
-    // Cool sky + WARM ground bounce. The warm floor reflection is what makes
-    // concrete read as concrete instead of blue plastic.
-    this.scene.add(new THREE.HemisphereLight(0x2a3550, 0x241c14, 0.75));
-    // ART-03: a guaranteed brightness floor — no purely black region anywhere
-    // in the arena, even where no sodium lamp reaches.
-    this.scene.add(new THREE.AmbientLight(0x3a4a6a, 0.25));
-    const dir = new THREE.DirectionalLight(0xfff0dd, 0.6);
-    dir.position.set(12, 24, 10);
-    this.scene.add(dir);
-
-    // Warm sodium lamps at the two maze corners, the two wing mouths and the
-    // two central-approach flanks — the "clear light/dark hierarchy at the
-    // maze turns" the prompt asks for. ART-03: 4 -> 6 lamps, 150 -> 220.
-    const sodium: Array<[number, number]> = [
-      [-10, 16],
-      [10, 16],
-      [23, 0],
-      [-23, 0],
-      [0, 8],
-      [0, -8],
-    ];
-    for (const [x, z] of sodium) {
-      const l = new THREE.PointLight(0xffb45a, 220, 26, 2);
-      l.position.set(x, 5.5, z);
-      this.scene.add(l);
-    }
+    // ART-06: the six warm 0xffb45a sodium lamps are REMOVED — they were a
+    // night-time industrial setting that contradicted the blue-sky daytime
+    // scene and were the direct source of the ART-04 over-warm cast. The light
+    // rig is now actual daylight:
+    //  * a strong warm-white directional SUN (the single key light),
+    //  * a HEMISPHERE light in the sky colour with a sand-coloured ground
+    //    bounce (the floor reflects warm light back into shadowed faces),
+    //  * a small COOL ambient so faces pointing away from the sun never fall
+    //    to pure black.
+    this.scene.add(new THREE.HemisphereLight(ENV.skyHorizon, 0xcdb27e, 0.85));
+    const sun = new THREE.DirectionalLight(0xfff6e6, 1.7);
+    sun.position.set(18, 28, 10);
+    this.scene.add(sun);
+    this.scene.add(new THREE.AmbientLight(0xdfe9f7, 0.15));
 
     // Team spawn glow (identity, kept but restrained under the tonemap).
     const blueLight = new THREE.PointLight(0x18e0ff, 110, 50, 2);
@@ -411,22 +404,66 @@ export class Renderer {
   }
 
   private buildArena(map: MapData): void {
-    // Ground
+    // ART-06: warm sand ground with a procedural grain texture — matte
+    // (high roughness, zero metalness) so the sun reads as diffuse daylight,
+    // not a specular sheen. The old tech GridHelper is gone: a neon grid on
+    // sand makes no sense.
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(120, 120),
-      new THREE.MeshStandardMaterial({ color: ENV.ground, roughness: 1, metalness: 0 })
+      new THREE.MeshStandardMaterial({ map: this.makeSandTexture(), roughness: 1, metalness: 0 })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = 0;
     this.scene.add(ground);
 
-    const grid = new THREE.GridHelper(64, 32, ENV.gridA, ENV.gridB);
-    (grid.material as THREE.Material).transparent = true;
-    (grid.material as THREE.Material).opacity = 0.22;
-    grid.position.y = 0.02;
-    this.scene.add(grid);
-
     this.buildArenaSolids(map);
+  }
+
+  /** ART-06: procedural sand grain — a deterministic (seeded LCG, stable
+   *  across reloads) per-pixel lightness jitter over the base sand colour,
+   *  plus a scattering of soft dark/light patches so the floor has visible
+   *  texture and no large dead-flat region. Repeats across the 120 m plane. */
+  private makeSandTexture(): THREE.CanvasTexture {
+    const S = 256;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    const ctx = cv.getContext('2d')!;
+    let s = 0x5a7d0d5a >>> 0; // fixed seed: deterministic texture
+    const rnd = (): number => {
+      s = (s * 48271) % 2147483647; // Park-Minimal LCG: stable per seed
+      return s / 2147483647;
+    };
+    // Base sand 0xd9c08a with ±10 per-pixel lightness jitter (the grain).
+    const img = ctx.createImageData(S, S);
+    const [br, bg, bb] = [217, 192, 138];
+    for (let i = 0; i < img.data.length; i += 4) {
+      const j = (rnd() - 0.5) * 20;
+      img.data[i] = br + j;
+      img.data[i + 1] = bg + j * 0.9;
+      img.data[i + 2] = bb + j * 0.8;
+      img.data[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    // Soft mottling: a handful of translucent light/dark patches on top.
+    for (let i = 0; i < 36; i++) {
+      const x = S * rnd();
+      const y = S * rnd();
+      const r = S * (0.05 + 0.16 * rnd());
+      const dark = rnd() < 0.5;
+      const a = 0.05 + rnd() * 0.09;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, dark ? `rgba(120,95,55,${a})` : `rgba(255,240,205,${a})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(14, 14);
+    return tex;
   }
 
   /** The solid boxes of one map (into arenaGroup so setMap can rebuild it). */
@@ -714,6 +751,18 @@ export class Renderer {
       y: (-v.y * 0.5 + 0.5) * window.innerHeight,
       behind: v.z > 1,
     };
+  }
+
+  /** ART-06 E2E hook: is the world point inside the camera frustum AND inside
+   *  the central screen band (38%..62% both axes) that the team-colour pixel
+   *  assertions sample? Lets the test park a unit where it is guaranteed to
+   *  land in the sampled band, on any map seed. */
+  pointInViewBand(x: number, y: number, z: number): boolean {
+    const v = new THREE.Vector3(x, y, z).project(this.camera);
+    if (v.z > 1) return false; // behind the camera
+    const sx = (v.x + 1) / 2;
+    const sy = (1 - v.y) / 2;
+    return sx > 0.38 && sx < 0.62 && sy > 0.38 && sy < 0.62;
   }
 
   private updateCamera(match: Match, dt: number): void {

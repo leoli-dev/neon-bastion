@@ -82,6 +82,9 @@ type Hooks = {
   simulateHitOnPlayer: (causeId: number, part?: 'head' | 'body') => void;
   cameraKicks: () => { kickYaw: number; kickPitch: number; recoil: number; recoilCharge: number };
   fastForwardSky: (seconds: number) => void;
+  /** ART-06: a sight-clear spot on the player's facing that lands in the
+   *  central screen band (null if none exists on this seed). */
+  findCenterViewSpot: () => { x: number; z: number } | null;
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   forceSpectate: () => void;
@@ -976,6 +979,132 @@ test('10: ART-05 sky — blue gradient overhead, clouds drift, frozen under redu
     `under prefers-reduced-motion the clouds must be static (${frozen} of ${totalPx} band pixels changed after 3s)`
   ).toBeLessThan(totalPx * 0.001);
 
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// ART-06: measurable brightness floor for the daylight arena.
+//
+// The reviewer's probe (and this test) use the EXACT same instrumentation:
+//   seed 20260212 (the app's default seed), player teleported to (0, 20)
+//   facing the centre (spawn yaw π = facing -Z = straight at the centre),
+//   WebGL canvas resampled to 320×180,
+//   L = 0.2126R + 0.7152G + 0.0722B.
+// Before ART-06 that probe measured meanLuma 21.4, darkFrac 0.748, 2 non-
+// empty histogram buckets and no pixel above L=96. The floors below are the
+// numbers the task commits to — they live in the TEST, not the commit message.
+interface Art06Probe {
+  meanLuma: number;
+  darkFrac: number; // fraction of pixels with L < 32
+  buckets: number[]; // 8 histogram buckets, 32 luma wide each
+  nonEmptyBuckets: number;
+  meanR: number;
+  meanB: number;
+}
+async function art06Probe(page: Page): Promise<Art06Probe> {
+  // The pre-start scene is static (the fixed-tick loop only runs after
+  // start()), so every sampled frame is the same settled view; sample a few
+  // anyway because headless rAF is throttled and the first frame after the
+  // teleport may not have presented yet. Keep the brightest (settled) one.
+  let best: Art06Probe = { meanLuma: 0, darkFrac: 1, buckets: [0, 0, 0, 0, 0, 0, 0, 0], nonEmptyBuckets: 0, meanR: 0, meanB: 0 };
+  for (let i = 0; i < 6; i++) {
+    const p = await page.evaluate((): Art06Probe => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0, 320, 180);
+      const d = ctx.getImageData(0, 0, 320, 180).data;
+      const n = d.length / 4;
+      let sumL = 0, sumR = 0, sumB = 0, dark = 0;
+      const buckets = [0, 0, 0, 0, 0, 0, 0, 0];
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        sumL += L;
+        sumR += r;
+        sumB += b;
+        if (L < 32) dark++;
+        buckets[Math.min(7, Math.floor(L / 32))]++;
+      }
+      return {
+        meanLuma: sumL / n,
+        darkFrac: dark / n,
+        buckets,
+        nonEmptyBuckets: buckets.filter((x) => x > 0).length,
+        meanR: sumR / n,
+        meanB: sumB / n,
+      };
+    });
+    if (p.meanLuma > best.meanLuma) best = p;
+    await page.waitForTimeout(150);
+  }
+  return best;
+}
+
+test('11: ART-06 daylight arena — measurable brightness floor, no over-warm cast', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.seed(20260212); // the reviewer probe's seed (= the app default)
+    t.teleport(0, 0, 20); // facing the centre: spawn yaw π = facing -Z
+  });
+  await page.waitForTimeout(300); // let a few settled frames present
+
+  const probe = await art06Probe(page);
+  console.log('ART-06 PROBE', JSON.stringify(probe));
+
+  // 1. Mean luminance floor: the pre-ART-06 frame measured 21.4.
+  expect(
+    probe.meanLuma,
+    `meanLuma must be ≥ 90 (the pre-ART-06 frame measured 21.4) — got ${probe.meanLuma.toFixed(1)}`
+  ).toBeGreaterThanOrEqual(90);
+
+  // 2. Dark-fraction ceiling: fraction of pixels below L=32 (was 0.748).
+  expect(
+    probe.darkFrac,
+    `darkFrac (L<32) must be ≤ 0.15 (was 0.748) — got ${probe.darkFrac.toFixed(3)}`
+  ).toBeLessThanOrEqual(0.15);
+
+  // 3. Luminance spread: at least 4 of the 8 histogram buckets (width 32)
+  // must be non-empty — a lit scene, not a flat wash.
+  expect(
+    probe.nonEmptyBuckets,
+    `at least 4 of 8 histogram buckets (width 32) must be non-empty (buckets ${probe.buckets.join(',')})`
+  ).toBeGreaterThanOrEqual(4);
+
+  // 4. Over-warm guard (the ART-04 lesson): the whole frame's red-minus-blue
+  // channel mean must stay ≤ 40 — sunlit sand alone is warm, so the sky
+  // contribution must keep the balance honest.
+  expect(
+    probe.meanR - probe.meanB,
+    `mean(R)-mean(B) must be ≤ 40 (warm-neutral daylight, not an orange cast) — got ${(probe.meanR - probe.meanB).toFixed(1)} (R=${probe.meanR.toFixed(1)} B=${probe.meanB.toFixed(1)})`
+  ).toBeLessThanOrEqual(40);
+
+  // 5. Team identity is not sacrificed to the brightness: on this same
+  // daylight frame a red unit placed on a sight-clear spot inside the central
+  // screen band must still read as red-team-coloured pixels (same 0xff3d63-
+  // family classifier the glass test uses).
+  const placed = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    const spot = t.findCenterViewSpot();
+    if (spot) t.teleport(4, spot.x, spot.z);
+    [5, 6, 7].forEach((id) => t.teleport(id, -26, -24)); // park the rest off-axis
+    return spot;
+  });
+  expect(placed, 'a sight-clear spot in the player\u2019s view band must exist on this seed').not.toBeNull();
+  await page.waitForTimeout(300);
+  const red = await redPixelsInCentre(page);
+  console.log('ART-06 RED UNIT ON SAND', JSON.stringify(red));
+  expect(
+    red.count,
+    `a red unit (0xff3d63) on the sand must stay clearly team-readable (sample ${red.sample.join(',')})`
+  ).toBeGreaterThan(40);
+
+  await page.screenshot({ path: 'screenshots/11-daylight.png' });
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

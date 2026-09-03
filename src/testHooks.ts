@@ -32,6 +32,9 @@ export interface TeamArenaTestHooks {
   fastForwardSky: (seconds: number) => void;
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
+  /** ART-06: a sight-clear spot on the player's facing that lands in the
+   *  central screen band (null if none exists on this seed). */
+  findCenterViewSpot: () => { x: number; z: number } | null;
   forceSpectate: () => void;
   repaintHud: () => void;
 }
@@ -66,6 +69,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     fastForwardSky: (seconds) => app.renderer.stepSky(seconds),
     teleport: (unitId, x, z) => app.teleport(unitId, x, z),
     fastForward: (seconds) => app.fastForward(seconds),
+    findCenterViewSpot: () => app.findCenterViewSpot(),
     forceSpectate: () => app.forceSpectate(),
     repaintHud: () => app.repaintHud(),
   };

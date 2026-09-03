@@ -11,7 +11,7 @@ import { Renderer } from './render/renderer';
 import { HUD } from './render/hud';
 import { Audio } from './game/audio';
 import { eyeOf, type FireResult } from './game/combat/hitscan';
-import { groundHeight } from './game/map/geometry';
+import { groundHeight, losClear, pointInSolidXZ } from './game/map/geometry';
 import { createTestHooks } from './testHooks';
 
 const TICK = 1 / 60;
@@ -431,6 +431,28 @@ export class App {
     if (this.match.state !== 'running') return;
     const n = Math.floor(seconds / TICK);
     for (let i = 0; i < n; i++) this.match.tick(TICK);
+  }
+
+  /** ART-06 E2E hook: find a spot straight ahead of the player that is (a) not
+   *  inside a solid, (b) in the player's view band (see
+   *  Renderer.pointInViewBand — the same band the red-pixel assertions
+   *  sample) and (c) has a clear sight line from the player's eye (glass
+   *  transparent, exactly like the AI's vision). Returns null if no spot
+   *  qualifies on this seed. */
+  findCenterViewSpot(): { x: number; z: number } | null {
+    const p = this.match.player;
+    const eye = eyeOf(p);
+    // Step from 2 m to 16 m ahead of the player along their facing.
+    for (let d = 2; d <= 16; d += 1) {
+      const fx = Math.sin(p.yaw), fz = Math.cos(p.yaw);
+      const x = p.pos.x + fx * d;
+      const z = p.pos.z + fz * d;
+      if (this.match.solids.some((s) => pointInSolidXZ(s, x, z))) continue;
+      const chestY = Math.min(groundHeight(this.match.solids, x, z), 1.2) + 1.0;
+      if (!losClear(this.match.solids, eye.x, eye.z, eye.y, x, z, chestY, 1.0)) continue;
+      if (this.renderer.pointInViewBand(x, chestY, z)) return { x, z };
+    }
+    return null;
   }
 
   forceSpectate(): void {
