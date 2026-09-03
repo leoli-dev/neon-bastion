@@ -83,9 +83,11 @@ const solids: Solid[] = [
   s(24, 0, -13, 3, 3, 0, 3, 'cover', 'cover-n-col'),
 
   // ---- Flanking mazes (south-west & south-east baffles with clear lanes) ----
-  s(25, -8, 17, 2, 6, 0, 3, 'wall', 'maze-sw-a'),
+  // MAP-01: manual material overrides for verification only — one hedge and
+  // one glass wall among the four maze walls. (Randomized in task 4.)
+  s(25, -8, 17, 2, 6, 0, 3, 'wall', 'maze-sw-a', { material: 'hedge' }),
   s(26, -14, 14, 5, 2, 0, 3, 'wall', 'maze-sw-b'),
-  s(27, 8, 17, 2, 6, 0, 3, 'wall', 'maze-se-a'),
+  s(27, 8, 17, 2, 6, 0, 3, 'wall', 'maze-se-a', { material: 'glass' }),
   s(28, 14, 14, 5, 2, 0, 3, 'wall', 'maze-se-b'),
 ];
 

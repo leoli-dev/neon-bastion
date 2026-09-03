@@ -21,7 +21,9 @@
 //   6. player-taken damage -> red vignette + damage-direction arc + camera
 //      kick (the 'hit' event is consumed), firing recoil accumulates
 //   7. no-WebGL fallback (?nogl=1) -> legible 2D status, no white screen/error
-// Seven screenshots of the real rendered game are saved to screenshots/.
+//   8. MAP-01 glass wall: a red unit parked behind the glass maze wall is
+//      visible through it (red-team pixels sampled from the canvas centre)
+// Eight screenshots of the real rendered game are saved to screenshots/.
 // ============================================================================
 
 import { test, expect } from '@playwright/test';
@@ -603,4 +605,85 @@ test('7: no-WebGL fallback shows a legible 2D status, never a white screen', asy
   await page.screenshot({ path: 'screenshots/07-fallback.png' });
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors in the fallback: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+interface RedSample {
+  count: number;
+  sample: [number, number, number];
+}
+/** Count red-team-coloured pixels (0xff3d63-ish: strong R, R >> G, R > B)
+ *  inside a central band of the WebGL canvas. Central band only, so the hit is
+ *  attributed to the unit on the sight axis, not to off-axis scenery. Samples
+ *  several frames (headless rAF is throttled) and keeps the best. */
+async function redPixelsInCentre(page: import('@playwright/test').Page): Promise<RedSample> {
+  let best: RedSample = { count: 0, sample: [0, 0, 0] };
+  for (let i = 0; i < 8; i++) {
+    const r = await page.evaluate((): RedSample => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = gl.width;
+      c.height = gl.height;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0);
+      const x0 = Math.floor(c.width * 0.38);
+      const x1 = Math.ceil(c.width * 0.62);
+      const y0 = Math.floor(c.height * 0.38);
+      const y1 = Math.ceil(c.height * 0.62);
+      const d = ctx.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+      let count = 0;
+      let sample: [number, number, number] = [0, 0, 0];
+      let bestLuma = -1;
+      for (let i = 0; i < d.length; i += 4) {
+        const pr = d[i], pg = d[i + 1], pb = d[i + 2];
+        // red team 0xff3d63 family: bright red dominant, well above green,
+        // blue present but below red (the pale-cyan glass tint does not match).
+        if (pr > 100 && pg < pr * 0.6 && pb < pr * 0.95) {
+          count++;
+          const luma = 0.2126 * pr + 0.7152 * pg + 0.0722 * pb;
+          if (luma > bestLuma) {
+            bestLuma = luma;
+            sample = [pr, pg, pb];
+          }
+        }
+      }
+      return { count, sample };
+    });
+    if (r.count > best.count) best = r;
+    if (best.count > 40) break;
+    await page.waitForTimeout(150);
+  }
+  return best;
+}
+
+test('8: glass wall is see-through — red unit behind it is visible in canvas pixels', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // Static pre-start scene: the fixed-tick loop only runs after start(), so
+  // this placement cannot drift while frames present.
+  //
+  // maze-se-a (solid 27) is the GLASS maze wall: spans x 7..9, z 14..20, 0..3 m
+  // high. Put the player 1.5 m south of it (spawn yaw π = facing north, i.e.
+  // straight at the wall) and a red unit 1 m north of it. The view from the
+  // player's eye (y 1.62) to the unit passes through the glass volume, so the
+  // unit can only be seen THROUGH the wall.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(0, 8, 21.5); // player, facing north, straight at the glass wall
+    t.teleport(4, 8, 13); // red unit Raxx, just behind the glass wall
+    [5, 6, 7].forEach((id) => t.teleport(id, -26, -20)); // park other reds far west, off-axis
+  });
+
+  await page.waitForTimeout(300); // let a few rendered frames present
+  const red = await redPixelsInCentre(page);
+  console.log('GLASS SEE-THROUGH RED PIXELS', JSON.stringify(red));
+  expect(
+    red.count,
+    `a red unit behind the glass wall must be visible through it (sample ${red.sample.join(',')})`
+  ).toBeGreaterThan(40);
+
+  await page.screenshot({ path: 'screenshots/08-glass-see-through.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

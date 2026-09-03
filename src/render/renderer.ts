@@ -211,7 +211,36 @@ export class Renderer {
     this.scene.add(redLight);
   }
 
-  private solidMaterial(s: Solid): THREE.MeshStandardMaterial {
+  /** MAP-01: material is orthogonal to `kind`. `solid` (the default) keeps
+   *  the exact legacy per-kind appearance; `hedge` and `glass` override it. */
+  private materialFor(s: Solid): THREE.MeshStandardMaterial {
+    const mat = s.material ?? 'solid';
+    if (mat === 'hedge') {
+      // Opaque foliage: saturated plant green, matte (high roughness, zero
+      // metalness). A deterministic per-solid perturbation (seeded from the
+      // solid id) shifts hue/saturation/lightness slightly so no two hedge
+      // walls read as exactly the same green.
+      const c = new THREE.Color(0x3f7d3a);
+      const hsl = { h: 0, s: 0, l: 0 };
+      c.getHSL(hsl);
+      const t = (s.id * 0.61803398875) % 1; // golden-ratio hash: stable per id
+      c.setHSL(
+        (hsl.h + (t - 0.5) * 0.045 + 1) % 1,
+        Math.min(1, hsl.s + (t - 0.5) * 0.12),
+        Math.min(1, Math.max(0, hsl.l + (t - 0.5) * 0.06)),
+      );
+      return new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, metalness: 0 });
+    }
+    if (mat === 'glass') {
+      // Faintly cyan-tinted, low roughness, ~22% opaque: a unit on the far
+      // side must stay clearly readable through it (verified by the E2E
+      // canvas-pixel assertion). No depth write so transparents behind it
+      // (team rings, grid) keep blending correctly.
+      return new THREE.MeshStandardMaterial({
+        color: 0xa8dce8, roughness: 0.08, metalness: 0.1,
+        transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide,
+      });
+    }
     let color = ENV.wall;
     let emissive = 0x000000;
     let emissiveIntensity = 0;
@@ -249,7 +278,7 @@ export class Renderer {
     for (const s of map.solids) {
       const h = Math.max(0.05, s.top - s.bottom);
       const geo = new THREE.BoxGeometry(s.sx, h, s.sz);
-      const mesh = new THREE.Mesh(geo, this.solidMaterial(s));
+      const mesh = new THREE.Mesh(geo, this.materialFor(s));
       mesh.position.set(s.x, s.bottom + h / 2, s.z);
       this.scene.add(mesh);
 

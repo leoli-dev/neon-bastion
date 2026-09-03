@@ -16,6 +16,10 @@ export function teamColor(t: Team): string {
   return t === 'blue' ? '#2f8fff' : '#ff3b3b';
 }
 
+/** Visual/collision material of a solid — orthogonal to its `kind` (MAP-01).
+ *  The same wall can be plain solid, opaque hedge foliage, or transparent glass. */
+export type SolidMaterial = 'solid' | 'hedge' | 'glass';
+
 /** A single axis-aligned solid in the map (wall / cover / platform / ramp / boundary). */
 export interface Solid {
   id: number;
@@ -29,6 +33,8 @@ export interface Solid {
   bottom: number;
   top: number;
   kind: 'boundary' | 'wall' | 'cover' | 'platform' | 'ramp' | 'spawn';
+  /** Material override (MAP-01). Unset = 'solid' (legacy appearance). */
+  material?: SolidMaterial;
   /** Ramp axis + which X/Z end is the high end (only for kind === 'ramp'). */
   rampAxis?: 'x' | 'z';
   rampHighPositive?: boolean;
