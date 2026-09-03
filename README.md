@@ -61,8 +61,9 @@ lock, which the browser requires a user gesture for).
   (unit hits AND wall hits), a live blueprint minimap (units as filled/hollow dots +
   team spawn wedges), fog, and ACES filmic tonemapping with a brightness floor
   (ambient + 6 sodium lamps) so the scene stays legible.
-- **Audio** — fully synthesized (fire, impact, headshot, footsteps, UI, and a
-  calm looping BGM — `M` toggles the loop, SFX always stay louder); no assets.
+- **Audio** — fully synthesized (fire, impact, headshot, footsteps, UI, and a fast
+  150 BPM A/B combat BGM with a synthesized kick/snare/hat skeleton — `M` toggles
+  the loop, SFX always stay louder); no assets.
 - **No backend** — the whole match runs client-side; "restart" just reseeds the RNG.
 
 ## What changed in this pass
