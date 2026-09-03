@@ -89,8 +89,22 @@ type Hooks = {
    *  the mottling layer alone, for the repeat-seam probe). */
   sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
   /** ART-08: per-unit local-space bounding boxes of the visible humanoid
-   *  parts (ground ring excluded) — the hitbox-hug assertions read these. */
+   *  parts (ground ring excluded — floor marker; weapon excluded — explicit
+   *  ART-10 exception, the held prop is not part of the hitbox). */
   unitVisualBounds: () => { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }[];
+  /** ART-10: the unit's hand weapon at the match clock: `firing` (raised
+   *  pose inside the shot-cooldown window), `rot` (pivot LOCAL rotation —
+   *  rest x ≈ +0.38 muzzle-down, raised x ≈ shot pitch − recoil kick),
+   *  `muzzleAtShot` (recorded barrel tip) and `flash` (last muzzle flash). */
+  weaponState: (unitId: number) => {
+    hasWeapon: boolean;
+    firing: boolean;
+    recoil: number;
+    aim: { x: number; y: number; z: number } | null;
+    rot: { x: number; y: number };
+    muzzleAtShot: { x: number; y: number; z: number } | null;
+    flash: { x: number; y: number; z: number } | null;
+  };
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   /** AUD-01: how many player footstep triggers have fired since spawn/reseed. */
@@ -1527,6 +1541,81 @@ test('18: ART-08 humanoid visuals hug the hitbox (<= 0.84 wide, y 0..1.87)', asy
   }
 
   await page.screenshot({ path: 'screenshots/18-humanoid.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// ART-10: third-person held weapon. Every unit carries a visible cold-metal
+// weapon (body + barrel + grip, NOT team-coloured) that droops in the rest
+// pose and SNAPS to the shot's aim direction with a short recoil when the
+// unit fires — readable as "this one is shooting" from the third-person
+// camera. The muzzle flash must spawn at the actual barrel tip (the renderer
+// records the tip from the shared muzzle math; the App spawns the flash
+// there), not at a separately-computed point.
+// The setup + shot + readout run in ONE evaluate so the rAF loop (which also
+// eases the weapon pose) cannot interleave between the trigger and the read.
+test('19: ART-10 third-person weapon — raised aim pose on fire, flash at the barrel', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page);
+
+  const r = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.start();
+    const s = t.state();
+    const u0 = s.units[0];
+    // Park the player 1.6 m in front of the central wall (seed 16, facing
+    // north) and fire straight ahead: the bullet lands in ~0.03 s, so the
+    // raised-pose (shot-cooldown) window is guaranteed still open when the
+    // pose is read — the rAF loop cannot interleave (one evaluate).
+    t.teleport(0, 0, 16);
+    t.shoot();
+    const fired = t.weaponState(0);
+    const allHaveWeapons = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => t.weaponState(i).hasWeapon);
+    return {
+      unitYaw: u0.yaw,
+      fired,
+      allHaveWeapons,
+      idle: t.weaponState(1), // a unit that has not fired
+    };
+  });
+  console.log('ART-10 WEAPON', JSON.stringify(r));
+
+  // 1) Every unit carries the weapon (shared makeWeaponMesh construction).
+  expect(r.allHaveWeapons, 'all 8 units must have a rendered weapon').toEqual(
+    [true, true, true, true, true, true, true, true]
+  );
+
+  // 2) The shooter's weapon is in the RAISED aim pose at the firing instant:
+  //    the flag is set, and the pivot pitch has snapped from the relaxed
+  //    muzzle-down rest (x ≈ +0.38) to the aim elevation minus the recoil
+  //    kick (x ≈ -0.14 for a flat shot) — a difference a third-person player
+  //    reads as "gun up, firing".
+  expect(r.fired.hasWeapon).toBe(true);
+  expect(r.fired.firing, 'shooter must be in the raised/aim pose at fire time').toBe(true);
+  expect(r.fired.rot.x, 'raised pitch must be far above the relaxed rest pose').toBeLessThan(0.38 - 0.3);
+  // Fired straight ahead: the weapon's local yaw offset is ~0 (spread only).
+  expect(Math.abs(r.fired.rot.y), 'weapon yaw must track the shot direction (≈ facing)').toBeLessThan(0.05);
+  // The recoil kick is live at the trigger moment.
+  expect(r.fired.recoil, 'full recoil at the firing instant').toBeGreaterThan(0.5);
+  // A unit that has not fired sits in the relaxed muzzle-down pose.
+  expect(r.idle.firing).toBe(false);
+  expect(r.idle.rot.x, 'idle weapon droops muzzle-down').toBeGreaterThan(0.3);
+
+  // 3) The muzzle flash spawned at the actual barrel tip (single source of
+  //    truth) — the distance between the flash and the recorded barrel tip
+  //    must be below a hair, not the old "two independent formulas" gap.
+  expect(r.fired.muzzleAtShot, 'barrel tip must be recorded at the trigger').not.toBeNull();
+  expect(r.fired.flash, 'muzzle flash must have spawned at the trigger').not.toBeNull();
+  const d = Math.hypot(
+    r.fired.flash!.x - r.fired.muzzleAtShot!.x,
+    r.fired.flash!.y - r.fired.muzzleAtShot!.y,
+    r.fired.flash!.z - r.fired.muzzleAtShot!.z
+  );
+  expect(d, `muzzle flash must sit at the barrel tip (distance ${d})`).toBeLessThan(0.02);
+
+  await page.screenshot({ path: 'screenshots/19-weapon.png' });
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

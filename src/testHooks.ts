@@ -48,9 +48,25 @@ export interface TeamArenaTestHooks {
    *  the seam probe checks the repeat wrap on the mottling layer. */
   sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
   /** ART-08: per-unit LOCAL-space bounding boxes of the visible humanoid
-   *  parts (ground ring excluded) — used to assert the visuals hug the
-   *  hitbox (≤ 0.84 wide/deep, y 0..1.87). */
+   *  parts (ground ring excluded — a floor marker, not the character; weapon
+   *  also excluded — an explicit ART-10 exception: the held prop is NOT part
+   *  of the hitbox, so the hitbox-hug assertion measures the character) —
+   *  used to assert the visuals hug the hitbox (≤ 0.84 wide/deep, y 0..1.87). */
   unitVisualBounds: () => { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }[];
+  /** ART-10: the unit's hand weapon at the match clock. `firing` = inside the
+   *  shot-cooldown window after the last trigger (raised pose); `rot` is the
+   *  weapon pivot's LOCAL rotation (rest: x ≈ +0.38 muzzle-down; raised:
+   *  x ≈ shot pitch − recoil kick); `muzzleAtShot` = recorded barrel-tip world
+   *  position; `flash` = world position of the most recent muzzle flash. */
+  weaponState: (unitId: number) => {
+    hasWeapon: boolean;
+    firing: boolean;
+    recoil: number;
+    aim: { x: number; y: number; z: number } | null;
+    rot: { x: number; y: number };
+    muzzleAtShot: { x: number; y: number; z: number } | null;
+    flash: { x: number; y: number; z: number } | null;
+  };
   /** FX-04: with one in-flight bullet flying straight AT the probe camera
    *  (~5.6 units away, 2.5 units off-axis so the trail is seen obliquely),
    *  how many warm-gold (0xffe08a family) pixels does one rendered frame
@@ -103,6 +119,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     findCenterViewSpot: () => app.findCenterViewSpot(),
     sandTextureCanvases: () => app.renderer.getSandTextureCanvases(),
     unitVisualBounds: () => app.renderer.unitVisualBounds(),
+    weaponState: (unitId) => app.weaponProbe(unitId),
     probeTrailWarmGold: () => {
       // FX-04: one in-flight bullet ~5.6 units from the probe camera pose
       // (camera at (0,4,12), view axis u = (0, 0.939693, -0.342020) = 70° up),

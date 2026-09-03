@@ -24,6 +24,10 @@ import { eyeOf } from '../game/combat/hitscan';
 import { sharedViewCanSee } from '../game/ai/aiPerception';
 import { FxPool } from './fxpools';
 import { WALK, gaitPose } from './walkAnim';
+import {
+  makeWeaponMesh, weaponAimRot, weaponMuzzleWorld,
+  WEAPON_FIRING_WINDOW, WEAPON_PIVOT_Y, WEAPON_RECOIL_TRAVEL, WEAPON_REST_PITCH,
+} from './weapon';
 
 // Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
 // wheel, both fully saturated, sitting on a desaturated ~210°/8% environment.
@@ -119,6 +123,16 @@ interface UnitVisual {
   prevZ: number;
   walkDist: number; // accumulated horizontal distance (drives the phase)
   motion: number;   // eased 0..1 swing gate (1 while moving on the ground)
+  /** ART-10: the weapon's rotation pivot (chest point; the weapon mesh is a
+   *  child). The pivot at (0, WEAPON_PIVOT_Y, 0) is what makes the barrel
+   *  tip coincide with the legacy muzzle-flash formula (see weapon.ts). */
+  weaponPivot: THREE.Group;
+  weaponAim: { x: number; y: number; z: number }; // aim dir of the last trigger
+  weaponShotAt: number;   // logic time of the last trigger, -1 if none
+  weaponRecoil: number;   // 0..1, decays after a trigger
+  /** ART-10: barrel-tip world position at the trigger moment — the muzzle
+   *  flash is spawned HERE, so flash and barrel never drift apart. */
+  muzzleAtShot: { x: number; y: number; z: number } | null;
 }
 
 interface Tracer {
@@ -754,8 +768,26 @@ export class Renderer {
       visor.position.set(0, CONFIG.headCenterY, CONFIG.headRadius - 0.02);
       add(visor, 'body');
 
+      // ART-10: the hand weapon. A rotation pivot at chest height carries the
+      // shared weapon geometry (makeWeaponMesh — reused by the later first-
+      // person view model). Rest pose: muzzle drooped ~22° below the horizon;
+      // on a shot event the renderer snaps it to the aim direction with a
+      // short recoil (see updateWeaponAnim).
+      // EXPLICIT ART-08 EXCEPTION: the weapon meshes are deliberately NOT
+      // added to `parts` (and thus not to the shared material states and NOT
+      // to unitVisualBounds) because the weapon is NOT part of the hitbox —
+      // hitting the gun never damages the unit, so the hitbox-hug assertion
+      // must measure the character, not the held prop.
+      const weaponPivot = new THREE.Group();
+      weaponPivot.name = 'weaponPivot';
+      weaponPivot.position.set(0, WEAPON_PIVOT_Y, 0);
+      weaponPivot.rotation.order = 'YXZ'; // yaw about Y, then pitch about the
+      weaponPivot.rotation.x = WEAPON_REST_PITCH; // local horizontal axis
+      weaponPivot.add(makeWeaponMesh().group);
+
       const group = new THREE.Group();
       for (const p of parts) group.add(p);
+      group.add(weaponPivot);
       this.scene.add(group);
 
       // Ground team-colour ring: an additive flat circle that stays visible
@@ -770,6 +802,11 @@ export class Renderer {
         group, ring, team: u.team, parts, bodyParts, headParts, matState: 'normal',
         legL, legR, armL, armR,
         prevX: u.pos.x, prevZ: u.pos.z, walkDist: 0, motion: 0,
+        weaponPivot,
+        weaponAim: { x: Math.sin(u.yaw), y: 0, z: Math.cos(u.yaw) },
+        weaponShotAt: -1,
+        weaponRecoil: 0,
+        muzzleAtShot: null,
       });
     }
   }
@@ -900,9 +937,13 @@ export class Renderer {
   }
 
   private muzzleCursor = 0;
+  /** The world position of the most recent muzzle flash (null until the
+   *  first spawn; reduced-motion spawns nothing, so it stays null there). */
+  private lastFlashPos: THREE.Vector3 | null = null;
   /** FX-01: the muzzle flash — a short additive gold sphere at the muzzle. */
   spawnMuzzleFlash(at: THREE.Vector3): void {
     if (this.reducedMotion) return;
+    this.lastFlashPos = at.clone();
     const m = this.muzzles[this.muzzleCursor++ % this.muzzles.length];
     m.mesh.position.copy(at);
     m.life = m.max = CONFIG.muzzleLife;
@@ -1008,6 +1049,8 @@ export class Renderer {
       // ART-09: advance this unit's walk cycle (pure render state — never
       // touches Unit/AIState). Dead units stop animating here.
       this.updateWalkAnim(u, v, dt);
+      // ART-10: raise / relax the hand weapon (also pure render state).
+      this.updateWeaponAnim(u, v, now, dt);
     }
 
     this.updateCamera(match, dt);
@@ -1149,6 +1192,103 @@ export class Renderer {
     setLimb(v.legR, tLR);
     setLimb(v.armL, tAL);
     setLimb(v.armR, tAR);
+  }
+
+  /**
+   * ART-10: consume the 'shot' event for a shooter: raise that unit's weapon
+   * SNAPPED to the shot's aim direction (spread included) with full recoil,
+   * and record the exact barrel-tip world position (`muzzleAtShot`) from the
+   * shared muzzle math — the App spawns the muzzle flash there, so the flash
+   * and the visible barrel are the same point by construction. Pure render
+   * state (never writes to Unit/AIState).
+   */
+  triggerShot(u: Unit, aim: Vec3, now: number): void {
+    const v = this.units[u.id];
+    if (!v) return;
+    v.weaponAim = { x: aim.x, y: aim.y, z: aim.z };
+    v.weaponShotAt = now;
+    v.weaponRecoil = 1;
+    const rot = weaponAimRot(u.yaw, aim, 1);
+    v.weaponPivot.rotation.y = rot.yaw;
+    v.weaponPivot.rotation.x = rot.pitch;
+    v.weaponPivot.position.z = -WEAPON_RECOIL_TRAVEL;
+    v.muzzleAtShot = weaponMuzzleWorld(u.pos, u.yaw, aim, 1);
+  }
+
+  /** ART-10: the shooter's recorded barrel-tip position at the trigger
+   *  moment (the muzzle flash was spawned there), or null before any shot. */
+  muzzleAtShot(unitId: number): { x: number; y: number; z: number } | null {
+    const v = this.units[unitId];
+    return v ? v.muzzleAtShot : null;
+  }
+
+  /**
+   * ART-10: advance one unit's weapon pose by one frame.
+   *
+   * While inside the shot-cooldown window after a trigger the gun stays
+   * raised at the shot's aim direction (with the decaying recoil kick —
+   * barrel up + pulled back, snapping home); outside it the gun relaxes
+   * to the muzzle-down rest pose. The right arm (local -X side; the mesh the
+   * builder labelled `armL` sits at x -0.325) eases forward to hold the gun
+   * while raised. Pure presentation — nothing is written to Unit/AIState.
+   */
+  private updateWeaponAnim(u: Unit, v: UnitVisual, now: number, dt: number): void {
+    const wp = v.weaponPivot;
+    const since = v.weaponShotAt >= 0 ? now - v.weaponShotAt : Infinity;
+    const firing = since >= 0 && since < WEAPON_FIRING_WINDOW;
+    v.weaponRecoil *= Math.exp(-dt * 8); // half-life ~87 ms: a short snap
+    if (v.weaponRecoil < 0.005) v.weaponRecoil = 0;
+
+    const k = Math.min(1, dt * 14);
+    let ty = 0;
+    let tx = WEAPON_REST_PITCH; // relaxed: muzzle droops below the horizon
+    if (firing) {
+      const rot = weaponAimRot(u.yaw, v.weaponAim, v.weaponRecoil);
+      ty = rot.yaw;
+      tx = rot.pitch;
+    } else {
+      v.weaponRecoil = 0;
+    }
+    wp.rotation.y += (ty - wp.rotation.y) * k;
+    wp.rotation.x += (tx - wp.rotation.x) * k;
+    const tz = -WEAPON_RECOIL_TRAVEL * v.weaponRecoil;
+    wp.position.z += (tz - wp.position.z) * k;
+
+    // Hold pose: the right-side arm (x -0.325, labelled armL by the builder)
+    // eases forward to the gun while raised; the walk cycle re-takes over
+    // (its own lerp) as soon as the pose relaxes.
+    if (firing) {
+      v.armL.rotation.x += (-1.1 - v.armL.rotation.x) * k;
+    }
+  }
+
+  /** ART-10 E2E probe: the shooter's weapon pose at the match clock. `firing`
+   *  is derived live (trigger inside the shot-cooldown window), `rot` is the
+   *  pivot's current LOCAL rotation (rest: x ≈ +0.38 muzzle-down; raised:
+   *  x ≈ shot pitch − recoil, so a raised gun clearly reads as "shooting"),
+   *  `muzzleAtShot` is the recorded barrel tip, `flash` the last flash. */
+  weaponProbe(unitId: number, now: number): {
+    hasWeapon: boolean;
+    firing: boolean;
+    recoil: number;
+    aim: { x: number; y: number; z: number } | null;
+    rot: { x: number; y: number };
+    muzzleAtShot: { x: number; y: number; z: number } | null;
+    flash: { x: number; y: number; z: number } | null;
+  } {
+    const v = this.units[unitId];
+    const flash = this.lastFlashPos ? { x: this.lastFlashPos.x, y: this.lastFlashPos.y, z: this.lastFlashPos.z } : null;
+    if (!v) return { hasWeapon: false, firing: false, recoil: 0, aim: null, rot: { x: 0, y: 0 }, muzzleAtShot: null, flash };
+    const since = v.weaponShotAt >= 0 ? now - v.weaponShotAt : Infinity;
+    return {
+      hasWeapon: true,
+      firing: since >= 0 && since < WEAPON_FIRING_WINDOW,
+      recoil: v.weaponRecoil,
+      aim: v.weaponShotAt >= 0 ? { ...v.weaponAim } : null,
+      rot: { x: v.weaponPivot.rotation.x, y: v.weaponPivot.rotation.y },
+      muzzleAtShot: v.muzzleAtShot ? { ...v.muzzleAtShot } : null,
+      flash: this.lastFlashPos ? { x: this.lastFlashPos.x, y: this.lastFlashPos.y, z: this.lastFlashPos.z } : null,
+    };
   }
 
   /** Number of live effects — feeds the debug panel's "active particles". */

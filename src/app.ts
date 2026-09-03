@@ -13,6 +13,7 @@ import { Audio } from './game/audio';
 import { FootstepTracker } from './game/footstep';
 import { eyeOf, type FireResult } from './game/combat/hitscan';
 import { groundHeight, losClear, pointInSolidXZ } from './game/map/geometry';
+import { MUZZLE_OFFSET, MUZZLE_DROP } from './render/weapon';
 import { createTestHooks } from './testHooks';
 
 const TICK = 1 / 60;
@@ -22,8 +23,9 @@ const DEFAULT_SEED = 20260212;
 // starting at the FPV camera origin projects to a single screen-centre point
 // and can never be seen by its own shooter; offsetting it forward (and slightly
 // below eye level, like a held rifle) makes the player's own fire visible.
-const MUZZLE_OFFSET = 0.55; // metres along the shot direction
-const MUZZLE_DROP = 0.12;   // metres below eye level
+// ART-10: the offsets now live in render/weapon.ts (shared with the weapon
+// geometry, whose barrel tip is built to sit EXACTLY at this point); the
+// formula below is only the fallback for a shooter without rendered visuals.
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
@@ -304,13 +306,25 @@ export class App {
       // 'impact' event when the projectile ARRIVES.
       const shooter = this.match.units.find((u) => u.id === e.shooterId);
       if (!shooter) return;
-      const from = eyeOf(shooter);
       const dir = e.res.aim ?? { x: Math.sin(shooter.yaw), y: 0, z: Math.cos(shooter.yaw) };
-      const muzzle = new THREE.Vector3(
-        from.x + dir.x * MUZZLE_OFFSET,
-        from.y - MUZZLE_DROP + dir.y * MUZZLE_OFFSET,
-        from.z + dir.z * MUZZLE_OFFSET
-      );
+      // ART-10: raise the shooter's hand weapon FIRST (snap to the shot's aim
+      // dir + full recoil) so the muzzle flash can spawn at the actual barrel
+      // tip — the renderer records that point from the shared muzzle math,
+      // replacing the old separately-computed formula (same constants, one
+      // source of truth, so the flash can never float outside the gun).
+      this.renderer.triggerShot(shooter, dir, this.match.now);
+      const tip = this.renderer.muzzleAtShot(shooter.id);
+      const muzzle = tip
+        ? new THREE.Vector3(tip.x, tip.y, tip.z)
+        : (() => {
+            // Fallback only: the legacy eye + dir*MUZZLE_OFFSET - DROP formula.
+            const from = eyeOf(shooter);
+            return new THREE.Vector3(
+              from.x + dir.x * MUZZLE_OFFSET,
+              from.y - MUZZLE_DROP + dir.y * MUZZLE_OFFSET,
+              from.z + dir.z * MUZZLE_OFFSET
+            );
+          })();
       this.renderer.spawnMuzzleFlash(muzzle);
       const eye = eyeOf(p);
       const d = muzzle.distanceTo(new THREE.Vector3(eye.x, eye.y, eye.z));
@@ -521,6 +535,11 @@ export class App {
     p.alive = false;
     p.hp = 0;
     if (this.match.state === 'running') this.match.tick(TICK);
+  }
+
+  /** ART-10: the shooter's weapon pose at the match clock (E2E probe). */
+  weaponProbe(unitId: number): ReturnType<Renderer['weaponProbe']> {
+    return this.renderer.weaponProbe(unitId, this.match.now);
   }
 
   /** Force the HUD (throttled leaderboard) to repaint now — deterministic E2E. */
