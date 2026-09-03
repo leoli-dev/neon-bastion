@@ -708,3 +708,98 @@ test('8: glass wall is see-through — red unit behind it is visible in canvas p
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });
+
+// ---------------------------------------------------------------------------
+interface MinimRed {
+  count: number;
+  sample: [number, number, number];
+}
+/** Count red-team-coloured (0xff3d63-ish) pixels in a small box of the
+ *  MINIMAP canvas around the world position (wx, wz). Uses the same world ->
+ *  minimap mapping as Renderer.drawMinimap (bounds ±30, 92% fit, centred).
+ *  Samples several frames (headless rAF is throttled) and keeps the max. */
+async function minimapRedCount(page: Page, wx: number, wz: number, box = 5): Promise<MinimRed> {
+  let best: MinimRed = { count: 0, sample: [0, 0, 0] };
+  for (let i = 0; i < 8; i++) {
+    const r = await page.evaluate(
+      (args: { wx: number; wz: number; box: number }): MinimRed => {
+        const { wx, wz, box } = args;
+        const mm = document.querySelector('canvas.nb-minimap') as HTMLCanvasElement;
+        const S = mm.width;
+        const span = 60; // map bounds are ±30 on both axes
+        const scale = (S * 0.92) / span;
+        const X = wx * scale + S / 2;
+        const Y = wz * scale + S / 2;
+        const x0 = Math.max(0, Math.floor(X - box / 2));
+        const y0 = Math.max(0, Math.floor(Y - box / 2));
+        const x1 = Math.min(S, Math.ceil(X + box / 2));
+        const y1 = Math.min(S, Math.ceil(Y + box / 2));
+        const d = mm.getContext('2d')!.getImageData(x0, y0, x1 - x0, y1 - y0).data;
+        let count = 0;
+        let sample: [number, number, number] = [0, 0, 0];
+        let bestLuma = -1;
+        for (let i = 0; i < d.length; i += 4) {
+          const pr = d[i], pg = d[i + 1], pb = d[i + 2];
+          // red team 0xff3d63: bright red dominant. The 14%-alpha spawn wedge,
+          // blueprint lines and cyan own-team dots do NOT match this.
+          if (pr > 100 && pg < pr * 0.6 && pb < pr * 0.95) {
+            count++;
+            const luma = 0.2126 * pr + 0.7152 * pg + 0.0722 * pb;
+            if (luma > bestLuma) {
+              bestLuma = luma;
+              sample = [pr, pg, pb];
+            }
+          }
+        }
+        return { count, sample };
+      },
+      { wx, wz, box }
+    );
+    if (r.count > best.count) best = r;
+    if (best.count > 0) break;
+    await page.waitForTimeout(150);
+  }
+  return best;
+}
+
+test('9: UX-12 minimap — enemy hidden behind the player, appears when in front', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page); // seed 16 = Classic layout
+
+  // Static pre-start scene (the fixed-tick loop only runs after start()), so
+  // placements cannot drift while frames present.
+  // Player at (0, 26) keeps the spawn yaw π (facing -Z / north). All three
+  // blue teammates are parked far north, ≥ 57 m from the enemy spot — beyond
+  // the 38 m vision radius — so only the PLAYER can contribute shared view.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(0, 0, 26); // player, facing -Z
+    t.teleport(1, 0, -28);
+    t.teleport(2, -26, -28);
+    t.teleport(3, 26, -28);
+    t.teleport(4, 0, 29.5); // enemy 3.5 m BEHIND the player
+    [5, 6, 7].forEach((id, i) => t.teleport(id, -10 + i * 10, -24)); // park rest of reds north
+  });
+  await page.waitForTimeout(300);
+
+  // Behind: 180° off the player's facing, outside every vision cone — the
+  // minimap must NOT mark it (the old always-draw minimap was a wallhack).
+  const behind = await minimapRedCount(page, 0, 29.5);
+  console.log('MINIMAP ENEMY BEHIND', JSON.stringify(behind));
+  expect(behind.count, `enemy behind the player must NOT be on the minimap (sample ${behind.sample.join(',')})`).toBe(0);
+
+  // In front: 6 m straight down the player's facing, clear line of sight —
+  // the shared view now contains it and the minimap MUST mark it.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(4, 0, 20);
+  });
+  const ahead = await minimapRedCount(page, 0, 20);
+  console.log('MINIMAP ENEMY AHEAD', JSON.stringify(ahead));
+  expect(ahead.count, `enemy straight ahead MUST appear on the minimap (sample ${ahead.sample.join(',')})`).toBeGreaterThan(0);
+
+  await page.screenshot({ path: 'screenshots/09-minimap-vision.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});

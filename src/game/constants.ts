@@ -106,6 +106,17 @@ export const CONFIG = {
     wanderRadius: 10,
   },
 
+  // --- Minimap (UX-12) — display-only knobs -------------------------------
+  // Deliberately SEPARATE from the `ai` block above: `ai.fovHalfDeg` /
+  // `ai.visionDist` are BALANCE knobs (what the AI actually perceives);
+  // these are PRESENTATION knobs (how the vision cone is drawn on the
+  // minimap and how the shared enemy view behaves). Do not merge them.
+  minimap: {
+    visionDist: 38, // radius (units) of the drawn vision cone
+    fovHalfDeg: 45, // half-angle of the drawn cone (90° total)
+    lastSeenFade: 0.7, // seconds an unseen enemy fades at its last known spot
+  },
+
   // --- Camera / spectator -------------------------------------------------
   spectateSmooth: 6, // camera lerp factor
   freeCamHeight: 26, // top-down fallback camera height

@@ -18,6 +18,7 @@ import { NEON_BASTION } from '../game/map/mapData';
 import { CONFIG } from '../game/constants';
 import { MAX_BULLETS } from '../game/combat/bullet';
 import { eyeOf } from '../game/combat/hitscan';
+import { sharedViewCanSee } from '../game/ai/aiPerception';
 
 // Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
 // wheel, both fully saturated, sitting on a desaturated ~210°/8% environment.
@@ -95,6 +96,9 @@ export class Renderer {
   private muzzleGeo: THREE.SphereGeometry;
   private minimap: CanvasRenderingContext2D;
   private minimapSize: number;
+  /** UX-12: last time/spot each enemy unit was inside the player team's
+   *  shared view — drives the short fade-out at the last known position. */
+  private enemyLastSeen = new Map<number, { x: number; z: number; at: number }>();
   private freeCamAngle = 0;
   private reducedMotion = false;
   private fovCurrent = CONFIG.fovBase;
@@ -689,13 +693,57 @@ export class Renderer {
       ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     }
 
-    // Units: alive = filled dot, dead = hollow ring. Player gets a white ring.
+    // UX-12: vision cones — the ±45° display arc (CONFIG.minimap) of every
+    // living participant of the PLAYER'S team, so the player can see which
+    // spots the team is covering. Own-team cones only (drawing the enemies'
+    // cones would leak their awareness). Purely visual: the AI keeps its own
+    // wider CONFIG.ai.fovHalfDeg perception cone.
+    const p = match.player;
+    const coneHalf = (CONFIG.minimap.fovHalfDeg * Math.PI) / 180;
+    const coneR = CONFIG.minimap.visionDist * scale;
     for (const u of match.units) {
+      if (u.team !== p.team || !u.alive) continue;
       const x = px(u.pos.x);
       const y = pz(u.pos.z);
-      const col = u.team === 'blue' ? '#18e0ff' : '#ff3d63';
+      const a = Math.PI / 2 - u.yaw; // canvas angle of the facing direction
       ctx.beginPath();
-      ctx.arc(x, y, u.isPlayer ? 4 : 3, 0, Math.PI * 2);
+      ctx.moveTo(x, y);
+      ctx.arc(x, y, coneR, a - coneHalf, a + coneHalf);
+      ctx.closePath();
+      ctx.fillStyle = p.team === 'blue' ? 'rgba(24,224,255,0.10)' : 'rgba(255,61,99,0.10)';
+      ctx.fill();
+    }
+
+    // Units. Own team (alive = filled dot, dead = hollow ring) always shows —
+    // rule unchanged. ENEMIES (UX-12) only appear while inside the player
+    // team's shared view (player OR any living teammate); just-lost enemies
+    // fade out at their last known spot over CONFIG.minimap.lastSeenFade.
+    const now = match.now;
+    const fade = CONFIG.minimap.lastSeenFade;
+    for (const u of match.units) {
+      let x = px(u.pos.x);
+      let y = pz(u.pos.z);
+      const col = u.team === 'blue' ? '#18e0ff' : '#ff3d63';
+      const r = u.isPlayer ? 4 : 3;
+      let alpha = 1;
+      if (u.team !== p.team) {
+        if (sharedViewCanSee(match.solids, match.units, p.team, u)) {
+          this.enemyLastSeen.set(u.id, { x: u.pos.x, z: u.pos.z, at: now });
+        }
+        const ls = this.enemyLastSeen.get(u.id);
+        if (!ls) continue; // never seen -> never shown (no wallhack)
+        const age = now - ls.at;
+        if (age < 0 || age > fade) {
+          this.enemyLastSeen.delete(u.id);
+          continue;
+        }
+        x = px(ls.x);
+        y = pz(ls.z);
+        alpha = age <= 0 ? 1 : 1 - age / fade; // live = 1, eases to 0
+      }
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
       if (u.alive) {
         ctx.fillStyle = col;
         ctx.fill();
@@ -704,11 +752,13 @@ export class Renderer {
         ctx.lineWidth = 1.5;
         ctx.globalAlpha = 0.5;
         ctx.stroke();
-        ctx.globalAlpha = 1;
       }
+      ctx.globalAlpha = 1;
       if (u.isPlayer && u.alive) {
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
         ctx.stroke();
       }
     }
