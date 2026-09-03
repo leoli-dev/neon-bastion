@@ -23,6 +23,7 @@ import { MAX_BULLETS } from '../game/combat/bullet';
 import { eyeOf } from '../game/combat/hitscan';
 import { sharedViewCanSee } from '../game/ai/aiPerception';
 import { FxPool } from './fxpools';
+import { WALK, gaitPose } from './walkAnim';
 
 // Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
 // wheel, both fully saturated, sitting on a desaturated ~210°/8% environment.
@@ -107,6 +108,17 @@ interface UnitVisual {
   /** Parts using the team HEAD role material. */
   headParts: THREE.Mesh[];
   matState: 'normal' | 'flash' | 'corpse';
+  /** ART-09: walk-cycle limbs (render-only — the swing lives HERE, never in
+   *  Unit/AIState, so the deterministic sim is untouched). */
+  legL: THREE.Mesh;
+  legR: THREE.Mesh;
+  armL: THREE.Mesh;
+  armR: THREE.Mesh;
+  /** ART-09: per-unit render-layer animation state (presentation only). */
+  prevX: number;
+  prevZ: number;
+  walkDist: number; // accumulated horizontal distance (drives the phase)
+  motion: number;   // eased 0..1 swing gate (1 while moving on the ground)
 }
 
 interface Tracer {
@@ -639,10 +651,14 @@ export class Renderer {
   private ensureUnitAssets(): void {
     if (this.unitGeos && this.teamMats) return;
     this.unitGeos = {
-      legs: new THREE.BoxGeometry(0.30, 0.74, 0.34),
+      // ART-09: leg + arm origins are moved to the HIP / SHOULDER (top) so a
+      // swing is a rotation about the joint, not about the limb centre. The
+      // mesh positions in buildUnits compensate, so the resting silhouette is
+      // bit-identical to before (the ART-08 hitbox-hug bounds are unchanged).
+      legs: new THREE.BoxGeometry(0.30, 0.74, 0.34).translate(0, -0.37, 0),
       chest: new THREE.BoxGeometry(0.60, 0.42, 0.44),
       shoulders: new THREE.BoxGeometry(0.84, 0.28, 0.44),
-      arms: new THREE.BoxGeometry(0.12, 0.52, 0.20),
+      arms: new THREE.BoxGeometry(0.12, 0.52, 0.20).translate(0, -0.26, 0),
       // 10x8 is low-poly enough to keep the boxy family, round enough to
       // read as a helmet from any angle.
       head: new THREE.SphereGeometry(0.27, 10, 8),
@@ -694,11 +710,16 @@ export class Renderer {
         (role === 'body' ? bodyParts : headParts).push(mesh);
       };
 
-      // Legs: two boxes inside the 0.84 footprint, feet at y 0.
+      // Legs: two boxes inside the 0.84 footprint, feet at y 0. ART-09: the
+      // geometry origin is the HIP (top), so the mesh sits at y 0.74 and a
+      // rotation.x swings the whole leg about the hip (foot at y 0 at rest).
+      let legL!: THREE.Mesh;
+      let legR!: THREE.Mesh;
       for (const side of [-1, 1]) {
         const leg = new THREE.Mesh(geos.legs, tm.body);
-        leg.position.set(0.19 * side, 0.37, 0); // y 0..0.74
+        leg.position.set(0.19 * side, 0.74, 0); // hip at y 0.74, foot at y 0
         add(leg, 'body');
+        if (side < 0) legL = leg; else legR = leg;
       }
       // Chest (narrower than the hitbox so the hanging arms stay visible)
       // + shoulder plate that fills the full 0.84 AABB width up to y 1.42.
@@ -711,11 +732,17 @@ export class Renderer {
       // Arms: hang close to the body, rotated ~20° forward so the outer
       // faces catch the sun differently from the chest and the arms read as
       // separate limbs. Outer edge reaches x ±0.416 — inside the ±0.42 AABB.
+      // ART-09: geometry origin is the SHOULDER (top) at y 1.31; the swing is
+      // a rotation.x under a 'YXZ' order so it applies AFTER the base yaw.
+      let armL!: THREE.Mesh;
+      let armR!: THREE.Mesh;
       for (const side of [-1, 1]) {
         const arm = new THREE.Mesh(geos.arms, tm.body);
-        arm.position.set(0.325 * side, 1.05, 0.14); // y 0.79..1.31
+        arm.position.set(0.325 * side, 1.31, 0.14); // shoulder at y 1.31, hand at y 0.79
+        arm.rotation.order = 'YXZ';
         arm.rotation.y = 0.35 * side;
         add(arm, 'body');
+        if (side < 0) armL = arm; else armR = arm;
       }
       // Head: exactly the hitbox head sphere (r 0.27, centre y 1.6).
       const head = new THREE.Mesh(geos.head, tm.head);
@@ -739,7 +766,11 @@ export class Renderer {
       ring.position.y = 0.06;
       this.scene.add(ring);
 
-      this.units.push({ group, ring, team: u.team, parts, bodyParts, headParts, matState: 'normal' });
+      this.units.push({
+        group, ring, team: u.team, parts, bodyParts, headParts, matState: 'normal',
+        legL, legR, armL, armR,
+        prevX: u.pos.x, prevZ: u.pos.z, walkDist: 0, motion: 0,
+      });
     }
   }
 
@@ -974,6 +1005,9 @@ export class Renderer {
       const fpv = match.spectate.mode === 'alive';
       v.group.visible = !isPlayer || !fpv;
       if (isPlayer) v.ring.visible = !fpv && !dead;
+      // ART-09: advance this unit's walk cycle (pure render state — never
+      // touches Unit/AIState). Dead units stop animating here.
+      this.updateWalkAnim(u, v, dt);
     }
 
     this.updateCamera(match, dt);
@@ -1042,6 +1076,79 @@ export class Renderer {
 
     this.drawMinimap(match);
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * ART-09: advance one unit's walk cycle by one frame.
+   *
+   * Pure presentation, entirely in render state (see UnitVisual's anim
+   * fields). The gait PHASE is driven by the unit's accumulated horizontal
+   * displacement (not the clock), so a faster unit gets a quicker cadence and
+   * sprinting (a shorter stride) steps up the frequency. Nothing is written
+   * back to `Unit` or `AIState`.
+   */
+  private updateWalkAnim(u: Unit, v: UnitVisual, dt: number): void {
+    const dx = u.pos.x - v.prevX;
+    const dz = u.pos.z - v.prevZ;
+    const movedXZ = Math.hypot(dx, dz);
+    v.prevX = u.pos.x;
+    v.prevZ = u.pos.z;
+
+    const lerp = Math.min(1, dt * 14);
+    const setLimb = (mesh: THREE.Mesh, target: number): void => {
+      mesh.rotation.x += (target - mesh.rotation.x) * lerp;
+    };
+
+    // Dead: stop animating — relax the limbs back to the standing pose while
+    // the group tips over (the corpse dim/fall is handled in update()).
+    if (!u.alive) {
+      v.walkDist = 0;
+      v.motion = 0;
+      setLimb(v.legL, 0);
+      setLimb(v.legR, 0);
+      setLimb(v.armL, 0);
+      setLimb(v.armR, 0);
+      return;
+    }
+
+    const moving = movedXZ > 1e-4;
+    // Swing gate: eases to 1 while grounded and moving, back to 0 when still
+    // (return to standing) or airborne. Drives amplitude, never the phase.
+    const gateTarget = u.grounded && moving ? 1 : 0;
+    v.motion += (gateTarget - v.motion) * Math.min(1, dt * 10);
+    if (gateTarget === 0 && v.motion < 1e-3) v.motion = 0;
+
+    // Reduced motion shrinks the amplitude but does not zero it (a walk cycle
+    // is readability information, not decoration).
+    const amp = this.reducedMotion ? WALK.reducedAmpScale : 1;
+
+    let tLL = 0, tLR = 0, tAL = 0, tAR = 0;
+    if (!u.grounded) {
+      // Airborne: gather the legs up into a fixed tuck, arms ease back. The
+      // gait phase does NOT advance in the air, so landing recovers cleanly.
+      tLL = WALK.airTuck * amp;
+      tLR = WALK.airTuck * amp;
+      tAL = -WALK.airArmTuck * amp;
+      tAR = -WALK.airArmTuck * amp;
+    } else {
+      if (moving) v.walkDist += movedXZ; // phase source: cumulative distance
+      const speed = dt > 1e-5 ? movedXZ / dt : 0;
+      const sprinting = speed > (CONFIG.walkSpeed + CONFIG.sprintSpeed) / 2;
+      const stride = sprinting ? WALK.strideSprint : WALK.strideWalk;
+      const pose = gaitPose(v.walkDist, stride); // unit amplitudes (±1)
+      const legAmp = sprinting ? WALK.legAmpSprint : WALK.legAmpWalk;
+      const armAmp = sprinting ? WALK.armAmpSprint : WALK.armAmpWalk;
+      const gate = v.motion * amp; // 0 when still -> standing pose
+      tLL = pose.leftLeg * legAmp * gate;
+      tLR = pose.rightLeg * legAmp * gate;
+      tAL = pose.leftArm * armAmp * gate;
+      tAR = pose.rightArm * armAmp * gate;
+    }
+
+    setLimb(v.legL, tLL);
+    setLimb(v.legR, tLR);
+    setLimb(v.armL, tAL);
+    setLimb(v.armR, tAR);
   }
 
   /** Number of live effects — feeds the debug panel's "active particles". */
