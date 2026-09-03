@@ -79,14 +79,34 @@ const ENV = {
   edgePlatform: 0x3fa9ff,
 };
 
+/**
+ * ART-08: one TEAM shares a full material set (normal / hit-flash / corpse,
+ * for the body role and the head role, plus the ground ring). Units only
+ * ever POINT their part meshes at one of these shared materials, so a hit
+ * flash or corpse dim is a cheap material swap — no per-unit material
+ * state to animate, and draw calls stay at parts-per-unit.
+ */
+interface TeamMats {
+  body: THREE.MeshStandardMaterial;
+  head: THREE.MeshStandardMaterial;
+  flashBody: THREE.MeshStandardMaterial;
+  flashHead: THREE.MeshStandardMaterial;
+  corpseBody: THREE.MeshStandardMaterial;
+  corpseHead: THREE.MeshStandardMaterial;
+  ring: THREE.MeshBasicMaterial;
+}
+
 interface UnitVisual {
   group: THREE.Group;
-  body: THREE.Mesh;
-  head: THREE.Mesh;
   ring: THREE.Mesh;
   team: 'blue' | 'red';
-  bodyMat: THREE.MeshStandardMaterial;
-  headMat: THREE.MeshStandardMaterial;
+  /** All humanoid part meshes (bounds probe, material swaps). */
+  parts: THREE.Mesh[];
+  /** Parts using the team BODY role material (torso, legs, arms, visor). */
+  bodyParts: THREE.Mesh[];
+  /** Parts using the team HEAD role material. */
+  headParts: THREE.Mesh[];
+  matState: 'normal' | 'flash' | 'corpse';
 }
 
 interface Tracer {
@@ -139,6 +159,18 @@ export class Renderer {
   /** ART-05 sky dome (hidden temporarily by the FX-04 probe). */
   private sky!: THREE.Mesh;
   private units: UnitVisual[] = [];
+  /** ART-08: the six shared humanoid part geometries (one set for ALL 8
+   *  units — never per-unit, never per-part-per-unit). */
+  private unitGeos: {
+    legs: THREE.BoxGeometry;
+    chest: THREE.BoxGeometry;
+    shoulders: THREE.BoxGeometry;
+    arms: THREE.BoxGeometry;
+    head: THREE.SphereGeometry;
+    visor: THREE.BoxGeometry;
+  } | null = null;
+  /** ART-08: per-team shared material sets (see TeamMats). */
+  private teamMats: { blue: TeamMats; red: TeamMats } | null = null;
   private tracers: Tracer[] = [];
   private bulletTrails: BulletTrail[] = [];
   private muzzles: Muzzle[] = [];
@@ -592,39 +624,151 @@ export class Renderer {
     }
   }
 
-  /** Create the 8 unit visuals (blue 0-3, red 4-7) + ground team rings. */
+  /** ART-08: build the shared humanoid geometries + per-team material sets
+   *  exactly once. All 8 units then reuse them: zero per-part geometry or
+   *  material allocation.
+   *
+   *  The proportions are pinned to the HITBOX (game/units/units.ts +
+   *  CONFIG), so aiming at a visible body part always hits:
+   *    - shoulders span the full 0.84 body-AABB width up to y 1.42
+   *    - the head IS the head sphere: r 0.27 centred at y 1.6 (y 1.33..1.87)
+   *    - arms hang just inside the 0.42 half-width (never past the AABB
+   *      edge), legs stay inside the 0.84 footprint, feet at y 0
+   *  The visor band on the face's +Z side (local forward, rotation.y = yaw
+   *  maps +Z to (sin yaw, cos yaw)) marks which way a unit is looking. */
+  private ensureUnitAssets(): void {
+    if (this.unitGeos && this.teamMats) return;
+    this.unitGeos = {
+      legs: new THREE.BoxGeometry(0.30, 0.74, 0.34),
+      chest: new THREE.BoxGeometry(0.60, 0.42, 0.44),
+      shoulders: new THREE.BoxGeometry(0.84, 0.28, 0.44),
+      arms: new THREE.BoxGeometry(0.12, 0.52, 0.20),
+      // 10x8 is low-poly enough to keep the boxy family, round enough to
+      // read as a helmet from any angle.
+      head: new THREE.SphereGeometry(0.27, 10, 8),
+      visor: new THREE.BoxGeometry(0.36, 0.12, 0.12),
+    };
+    const makeMats = (palette: typeof BLUE): TeamMats => ({
+      body: new THREE.MeshStandardMaterial({
+        color: palette.body, emissive: palette.emissive, emissiveIntensity: 0.7, roughness: 0.5, metalness: 0.2
+      }),
+      head: new THREE.MeshStandardMaterial({
+        color: palette.head, emissive: palette.emissive, emissiveIntensity: 0.45, roughness: 0.4, metalness: 0.2
+      }),
+      flashBody: new THREE.MeshStandardMaterial({
+        color: palette.body, emissive: palette.emissive, emissiveIntensity: 1.9, roughness: 0.5, metalness: 0.2
+      }),
+      flashHead: new THREE.MeshStandardMaterial({
+        color: palette.head, emissive: palette.emissive, emissiveIntensity: 1.6, roughness: 0.4, metalness: 0.2
+      }),
+      corpseBody: new THREE.MeshStandardMaterial({
+        color: palette.body, emissive: palette.emissive, emissiveIntensity: 0.05, roughness: 0.5, metalness: 0.2
+      }),
+      corpseHead: new THREE.MeshStandardMaterial({
+        color: palette.head, emissive: palette.emissive, emissiveIntensity: 0.05, roughness: 0.4, metalness: 0.2
+      }),
+      ring: new THREE.MeshBasicMaterial({
+        color: palette.ring, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false,
+      }),
+    });
+    this.teamMats = { blue: makeMats(BLUE), red: makeMats(RED) };
+  }
+
+  /** Create the 8 unit visuals (blue 0-3, red 4-7) + ground team rings.
+   *  ART-08: each unit is a low-poly HUMANOID — head (+ face visor),
+   *  shoulders, chest, two arms, two legs — built entirely from the shared
+   *  geometries and pointed at the team's shared materials. */
   buildUnits(units: Unit[]): void {
+    this.ensureUnitAssets();
+    const geos = this.unitGeos!;
     const ringGeo = new THREE.RingGeometry(0.34, 0.5, 28);
     for (const u of units) {
-      const palette = u.team === 'blue' ? BLUE : RED;
-      const bodyMat = new THREE.MeshStandardMaterial({
-        color: palette.body, emissive: palette.emissive, emissiveIntensity: 0.7, roughness: 0.5, metalness: 0.2
-      });
-      const headMat = new THREE.MeshStandardMaterial({
-        color: palette.head, emissive: palette.emissive, emissiveIntensity: 0.45, roughness: 0.4, metalness: 0.2
-      });
-      const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.0, 0.8), bodyMat);
-      body.position.y = 0.5;
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.4, 0.44), headMat);
-      head.position.y = 1.28;
+      const tm = this.teamMats![u.team === 'blue' ? 'blue' : 'red'];
+
+      const parts: THREE.Mesh[] = [];
+      const bodyParts: THREE.Mesh[] = [];
+      const headParts: THREE.Mesh[] = [];
+      const add = (mesh: THREE.Mesh, role: 'body' | 'head'): void => {
+        mesh.material = role === 'body' ? tm.body : tm.head;
+        parts.push(mesh);
+        (role === 'body' ? bodyParts : headParts).push(mesh);
+      };
+
+      // Legs: two boxes inside the 0.84 footprint, feet at y 0.
+      for (const side of [-1, 1]) {
+        const leg = new THREE.Mesh(geos.legs, tm.body);
+        leg.position.set(0.19 * side, 0.37, 0); // y 0..0.74
+        add(leg, 'body');
+      }
+      // Chest (narrower than the hitbox so the hanging arms stay visible)
+      // + shoulder plate that fills the full 0.84 AABB width up to y 1.42.
+      const chest = new THREE.Mesh(geos.chest, tm.body);
+      chest.position.y = 0.94; // y 0.73..1.15
+      add(chest, 'body');
+      const shoulders = new THREE.Mesh(geos.shoulders, tm.body);
+      shoulders.position.y = 1.28; // y 1.14..1.42 — tops out exactly at the
+      add(shoulders, 'body'); // body AABB ceiling
+      // Arms: hang close to the body, rotated ~20° forward so the outer
+      // faces catch the sun differently from the chest and the arms read as
+      // separate limbs. Outer edge reaches x ±0.416 — inside the ±0.42 AABB.
+      for (const side of [-1, 1]) {
+        const arm = new THREE.Mesh(geos.arms, tm.body);
+        arm.position.set(0.325 * side, 1.05, 0.14); // y 0.79..1.31
+        arm.rotation.y = 0.35 * side;
+        add(arm, 'body');
+      }
+      // Head: exactly the hitbox head sphere (r 0.27, centre y 1.6).
+      const head = new THREE.Mesh(geos.head, tm.head);
+      head.position.y = CONFIG.headCenterY;
+      add(head, 'head');
+      // Face visor: team-coloured band proud of the face (+Z = forward), so
+      // a unit's facing reads at a glance.
+      const visor = new THREE.Mesh(geos.visor, tm.body);
+      visor.position.set(0, CONFIG.headCenterY, CONFIG.headRadius - 0.02);
+      add(visor, 'body');
+
       const group = new THREE.Group();
-      group.add(body);
-      group.add(head);
+      for (const p of parts) group.add(p);
       this.scene.add(group);
 
       // Ground team-colour ring: an additive flat circle that stays visible
       // when a low-poly body is partially occluded by cover — the "non-UI"
       // team cue the prompt asks for.
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: palette.ring, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false,
-      });
-      const ring = new THREE.Mesh(ringGeo, ringMat);
+      const ring = new THREE.Mesh(ringGeo, tm.ring);
       ring.rotation.x = -Math.PI / 2;
       ring.position.y = 0.06;
       this.scene.add(ring);
 
-      this.units.push({ group, body, head, ring, team: u.team, bodyMat, headMat });
+      this.units.push({ group, ring, team: u.team, parts, bodyParts, headParts, matState: 'normal' });
     }
+  }
+
+  /** ART-08: per-unit LOCAL-space bounding box of the visible humanoid parts
+   *  (ground ring excluded — it is a floor marker, not the character). The
+   *  parts have static local transforms, so this is pure math from the
+   *  shared geometries' bounding boxes — used by the E2E hitbox-hug test.
+   *  The arms are rotated about Y, so each part box is rotated too. */
+  unitVisualBounds(): { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }[] {
+    const corner = new THREE.Vector3();
+    const partBox = new THREE.Box3();
+    return this.units.map((v) => {
+      const box = new THREE.Box3();
+      for (const m of v.parts) {
+        m.geometry.computeBoundingBox();
+        const bb = m.geometry.boundingBox!;
+        partBox.makeEmpty();
+        for (const cx of [bb.min.x, bb.max.x]) {
+          for (const cy of [bb.min.y, bb.max.y]) {
+            for (const cz of [bb.min.z, bb.max.z]) {
+              corner.set(cx, cy, cz).applyQuaternion(m.quaternion).add(m.position);
+              partBox.expandByPoint(corner);
+            }
+          }
+        }
+        box.union(partBox);
+      }
+      return { minX: box.min.x, maxX: box.max.x, minY: box.min.y, maxY: box.max.y, minZ: box.min.z, maxZ: box.max.z };
+    });
   }
 
   /** FX-04: one pooled two-layer trail (bright core + wide faint halo),
@@ -801,21 +945,29 @@ export class Renderer {
       v.group.position.set(u.pos.x, u.pos.y, u.pos.z);
       v.group.rotation.y = u.yaw;
       const dead = !u.alive;
+      const flashing = !dead && u.flashUntil > now;
       // A corpse lies down and dims; a live unit stands and keeps its ground ring.
       if (dead) {
         v.group.rotation.z = Math.PI / 2;
         v.group.position.y = u.pos.y + 0.3;
-        v.bodyMat.emissiveIntensity = 0.05;
-        v.headMat.emissiveIntensity = 0.05;
         v.ring.visible = false;
       } else {
         v.group.rotation.z = 0;
-        const flashing = u.flashUntil > now;
-        v.bodyMat.emissiveIntensity = flashing ? 1.9 : 0.7;
-        v.headMat.emissiveIntensity = flashing ? 1.6 : 0.45;
         v.ring.visible = true;
         v.ring.position.set(u.pos.x, u.pos.y + 0.06, u.pos.z);
         // Ring sits at the feet even on the platform (u.pos.y already carries height).
+      }
+      // ART-08: dim / hit-flash are whole-material states. Units share their
+      // team's material set, so changing the look is a pointer swap on the
+      // part meshes — done only when the state actually changes.
+      const matState: UnitVisual['matState'] = dead ? 'corpse' : flashing ? 'flash' : 'normal';
+      if (matState !== v.matState) {
+        v.matState = matState;
+        const tm = this.teamMats![v.team];
+        const bodyMat = matState === 'corpse' ? tm.corpseBody : matState === 'flash' ? tm.flashBody : tm.body;
+        const headMat = matState === 'corpse' ? tm.corpseHead : matState === 'flash' ? tm.flashHead : tm.head;
+        for (const m of v.bodyParts) m.material = bodyMat;
+        for (const m of v.headParts) m.material = headMat;
       }
       // The player's own body is hidden while in first person (but its ring shows).
       const isPlayer = u.isPlayer;

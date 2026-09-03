@@ -88,6 +88,9 @@ type Hooks = {
   /** ART-07: sand texture source canvases (base = final texture, mottle =
    *  the mottling layer alone, for the repeat-seam probe). */
   sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
+  /** ART-08: per-unit local-space bounding boxes of the visible humanoid
+   *  parts (ground ring excluded) — the hitbox-hug assertions read these. */
+  unitVisualBounds: () => { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }[];
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   /** AUD-01: how many player footstep triggers have fired since spawn/reseed. */
@@ -1464,6 +1467,66 @@ test('17: FX-05 unit hit bleeds dark red, wall hit sparks warm (distinct FX)', a
   expect(fx.sparks.darkRed, 'wall hit -> sparks only, no dark-red blood').toBe(0);
 
   await page.screenshot({ path: 'screenshots/17-fx05-impact.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+// ART-08: characters are humanoids (head / torso / arms / legs) and their
+// VISIBLE geometry must hug the hitbox (game/units/units.ts + CONFIG):
+//   body AABB  0.84 x 0.84, feet .. feet+1.42
+//   head sphere r 0.27 centred at feet+1.6  ->  y 1.33..1.87
+// If a visible shoulder/arm/leg stuck out of that box, players would aim at
+// it and miss — worse than the old boxes, which at least weren't readable
+// as anatomy. The renderer exposes each unit's local-space visual bounds
+// via the test hook; the checks run pre-start (static scene, no drift).
+test('18: ART-08 humanoid visuals hug the hitbox (<= 0.84 wide, y 0..1.87)', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page);
+
+  // No start(): the pre-start scene is static, so the (pure-math) bounds
+  // readout cannot race the tick loop.
+  const bounds = await page.evaluate(() =>
+    (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest.unitVisualBounds()
+  );
+  console.log('HUMANOID BOUNDS', JSON.stringify(bounds));
+  expect(bounds, 'all 8 units must have rendered visuals').toHaveLength(8);
+
+  const BODY_HALF = 0.42;   // CONFIG.bodyHalfW
+  const BODY_TOP = 1.42;    // CONFIG.bodyHeight
+  const HEAD_TOP = 1.6 + 0.27; // CONFIG.headCenterY + CONFIG.headRadius
+  const EPS = 1e-6;
+  for (let i = 0; i < bounds.length; i++) {
+    const b = bounds[i];
+    const w = b.maxX - b.minX;
+    const d = b.maxZ - b.minZ;
+    // 1) Never beyond the hitbox: horizontal (both axes) and vertical.
+    expect(
+      w, `unit ${i}: width ${w} must not exceed the 0.84 AABB width`
+    ).toBeLessThanOrEqual(2 * BODY_HALF + EPS);
+    expect(
+      d, `unit ${i}: depth ${d} must not exceed the 0.84 AABB depth`
+    ).toBeLessThanOrEqual(2 * BODY_HALF + EPS);
+    expect(
+      b.minY, `unit ${i}: lowest visible part ${b.minY} must not dangle below the feet`
+    ).toBeGreaterThanOrEqual(-EPS);
+    expect(
+      b.maxY, `unit ${i}: top ${b.maxY} must not rise above the head-sphere top`
+    ).toBeLessThanOrEqual(HEAD_TOP + EPS);
+    // 2) And HUG it: the silhouette fills the 0.84 width (shoulders) and the
+    //    head actually reaches the top of the hitbox, so every visible part
+    //    sits inside the box AND the box has no visible dead air at its
+    //    top edge.
+    expect(
+      w, `unit ${i}: width ${w} must fill the 0.84 AABB (shoulders)`
+    ).toBeGreaterThanOrEqual(0.83);
+    expect(
+      b.maxY, `unit ${i}: head must reach the hitbox top (got ${b.maxY})`
+    ).toBeGreaterThanOrEqual(HEAD_TOP - 0.01);
+  }
+
+  await page.screenshot({ path: 'screenshots/18-humanoid.png' });
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

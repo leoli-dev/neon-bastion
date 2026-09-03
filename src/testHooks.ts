@@ -47,6 +47,10 @@ export interface TeamArenaTestHooks {
    *  final grain+mottling texture, `mottle` is the mottling layer alone —
    *  the seam probe checks the repeat wrap on the mottling layer. */
   sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
+  /** ART-08: per-unit LOCAL-space bounding boxes of the visible humanoid
+   *  parts (ground ring excluded) — used to assert the visuals hug the
+   *  hitbox (≤ 0.84 wide/deep, y 0..1.87). */
+  unitVisualBounds: () => { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number }[];
   /** FX-04: with one in-flight bullet flying straight AT the probe camera
    *  (~5.6 units away, 2.5 units off-axis so the trail is seen obliquely),
    *  how many warm-gold (0xffe08a family) pixels does one rendered frame
@@ -98,6 +102,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     bgmPlaying: () => app.audio.bgmPlaying,
     findCenterViewSpot: () => app.findCenterViewSpot(),
     sandTextureCanvases: () => app.renderer.getSandTextureCanvases(),
+    unitVisualBounds: () => app.renderer.unitVisualBounds(),
     probeTrailWarmGold: () => {
       // FX-04: one in-flight bullet ~5.6 units from the probe camera pose
       // (camera at (0,4,12), view axis u = (0, 0.939693, -0.342020) = 70° up),
