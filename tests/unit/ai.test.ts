@@ -80,12 +80,16 @@ describe('AI: limited hit rate', () => {
     const m = new Match(99, openMap());
     const ai = m.units[1];
     const foe = m.units[4];
+    // Pin the shooter's doctrine: this test measures the standard engagement
+    // cadence (1 shot/s) plus accuracy at a fixed range. A flanker's
+    // one-shot-then-peel rhythm spaces shots far too sparsely for this
+    // budget, so we pin RUSHER here — test setup, same nature as dropping
+    // the victim's brain in ai_fire_events.test.ts, not a logic change.
+    ai.ai!.doctrine = 'rusher';
     // Pin the shooter at 15m from a live, invulnerable target in the open; pin
     // the other six units in the corners so they do not interfere. Stop once
-    // the shooter has fired 30 shots.
-    // (At the shared 1-shot/second cadence 30 shots take ~30s,
-    // so the budget is ~40s of ticks.)
-    for (let i = 0; i < 2400 && ai.shotIndex < 30 && m.state === 'running'; i++) {
+    // the shooter has fired enough shots or the budget runs out.
+    for (let i = 0; i < 2400 && ai.shotIndex < 80 && m.state === 'running'; i++) {
       ai.pos = { x: 0, y: 0, z: 20 };
       ai.hp = 100;
       ai.alive = true;
@@ -160,18 +164,32 @@ describe('AI: alert state', () => {
 });
 
 describe('AI: full match terminates', () => {
-  it('a seeded all-AI match reaches a terminal state (no central-platform stalemate)', () => {
-    for (const seed of [20260212, 1, 99]) {
+  // Termination regression: the old 3-seed scan was too thin — it never hit a
+  // layout+material combo where the state machine could freeze (e.g. seed 27,
+  // Twin Mazes with glass: low-HP units staring at each other through a pane
+  // with no exit out of 'retreat'). The scan below covers 40 consecutive
+  // seeds; each must reach a winner within 300 logic seconds, and a failure
+  // reports the stuck seed, layout and every unit's state + HP.
+  it('seeds 1..40 (plus legacy 99/20260212) all end within 300 logic seconds', () => {
+    const seeds: number[] = [];
+    for (let s = 1; s <= 40; s++) seeds.push(s);
+    seeds.push(99, 20260212); // legacy coverage from the original 3-seed test
+    for (const seed of seeds) {
       const m = new Match(seed);
       // Remove the passive human player so the whole match is AI-driven; the
       // human unit would otherwise camp at spawn and the match could never end.
       m.player.alive = false;
       m.player.hp = 0;
       m.tick(DT);
-      for (let i = 0; i < 90 * 60 && m.state === 'running'; i++) m.tick(DT);
+      for (let i = 0; i < 300 * 60 && m.state === 'running'; i++) m.tick(DT);
       const snap = m.snapshot();
-      expect(snap.state, `seed ${seed}: the all-AI match must end`).toBe('ended');
-      expect(snap.winner, `seed ${seed}: a team must win`).not.toBeNull();
+      const stuck =
+        `seed ${seed} [${m.map.name}] did not end by 300s: ` +
+        snap.units
+          .map((u) => `${u.id}:${u.name}=${u.aiState ?? 'off'}:hp${u.hp}`)
+          .join(' ');
+      expect(snap.state, stuck).toBe('ended');
+      expect(snap.winner, stuck).not.toBeNull();
       for (const u of snap.units) {
         expect(u.hp, `seed ${seed}: ${u.name} hp`).toBeGreaterThanOrEqual(0);
         expect(u.totalScore, `seed ${seed}: ${u.name} scoring invariant`).toBe(u.hitScore + 3 * u.kills);
@@ -179,10 +197,10 @@ describe('AI: full match terminates', () => {
       const loser = snap.winner === 'blue' ? 'red' : 'blue';
       expect(
         snap.units.filter((u) => u.team === loser && u.alive).length,
-        `seed ${seed}: losing team fully eliminated`
+        stuck
       ).toBe(0);
     }
-  });
+  }, 180000);
 });
 
 describe('AI: fair senses', () => {

@@ -147,9 +147,12 @@ export class BulletSystem {
         b.age += stepDist / CONFIG.bulletSpeed;
         if (b.remaining <= 1e-6 || b.age >= CONFIG.bulletMaxAge) {
           // Out of range (or lifetime cap): the bullet simply vanishes —
-          // it hit nothing, so it scores nothing.
+          // it hit nothing, so it scores nothing. It still SETTLES with an
+          // impact event (resolution 'miss'), so every fired bullet is
+          // accounted for on the event bus exactly once.
           b.active = false;
           b.result = this.settle(b, shooter, { kind: 'miss', point: b.pos, distance: b.age * CONFIG.bulletSpeed }, units, now);
+          onImpact?.(b);
         }
       }
     }

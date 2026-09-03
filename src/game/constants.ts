@@ -65,6 +65,36 @@ export const CONFIG = {
     inaccuracyDist: 0.0009, // added per meter of range
     moveInaccuracy: 0.004, // added when the AI is moving
     retreatHp: 32, // drop to 'retreat' at or below this HP
+    // AI-01: strategic personalities (doctrine)
+    doctrine: {
+      // rushers hold the fight: they only retreat below this (LOWER than
+      // retreatHp), i.e. they disengage later than everyone else
+      rusherRetreatHp: 20,
+      // flanker "one shot, then peel": seconds to hold cover in the 'flank'
+      // disengage state before re-joining the push
+      disengageTime: 1.6,
+      // a flanker refuses to join a firefight where this many of its own
+      // teammates are already within clumpRadius of the target
+      clumpRadius: 12,
+      clumpAllies: 2,
+      // stalemate escape: after this much match time, flankers drop the
+      // doctrine and fight as rushers so slow games still terminate
+      stalemateTime: 60,
+      // final escalation: after this much match time EVERY unit patrols a
+      // pure centre-push (no wander / no flank), so late-match survivors
+      // always converge and the game terminates
+      hardPushTime: 90,
+      // terminal escalation: after this much match time the AI state machine
+      // is replaced by a dumb "walk straight at the target, shoot if you can
+      // actually hit, cower only when bleeding with the shooter in front".
+      // Any two survivors that end up facing each other then trade until one
+      // dies, so no late-match layout can hold a permanent stalemate.
+      warTime: 120,
+    },
+    // hard cap (seconds) on how long a unit may sit in 'retreat' before it
+    // is forced to re-position. Livelock guard: seen-through-glass + low HP
+    // used to be a stable state with no exit out of 'retreat' at all
+    retreatDwell: 10,
     // behaviour timing
     decideInterval: 0.22, // how often an AI re-evaluates its state
     alertTime: 2.2, // how long an AI holds the 'alert' state investigating a sound

@@ -366,6 +366,7 @@ export class Match {
         hitScore: u.hitScore,
         totalScore: u.totalScore,
         aiState: u.ai?.state ?? null,
+        aiDoctrine: u.ai?.doctrine ?? null,
         aiTarget: u.ai?.targetId ?? -1,
         aiLastSeen: u.ai?.lastSeenPos
           ? { x: Math.round(u.ai.lastSeenPos.x * 10) / 10, z: Math.round(u.ai.lastSeenPos.z * 10) / 10 }

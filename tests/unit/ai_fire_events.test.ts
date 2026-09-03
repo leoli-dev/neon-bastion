@@ -69,6 +69,11 @@ function pinned1v1(seed: number): Pinned1v1 {
     m.units[idx].hp = 0;
   }
   foe.ai = null;
+  // Pin the shooter's doctrine: these tests pin a fixed 1-shot/s cadence and
+  // a deterministic kill outcome at 10 m. A flanker's one-shot-then-peel
+  // rhythm breaks that cadence, so we pin RUSHER — test setup, same nature
+  // as dropping the victim's brain above, not a logic change.
+  ai.ai!.doctrine = 'rusher';
   const events: MatchEvent[] = [];
   m.onEvent = (e) => events.push(e);
   const run = (maxTicks: number): void => {

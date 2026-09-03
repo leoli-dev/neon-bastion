@@ -137,11 +137,21 @@ export interface Unit {
   ai: AIState | null;
 }
 
+/**
+ * AI-01: a unit's strategic personality. 'rusher' pushes the mid / shortest
+ * path and holds the fight (retreats late); 'flanker' picks nodes far from
+ * its teammates' centroid (the outer lanes), fires one round then peels off
+ * to cover, and refuses to join an ongoing brawl. Assigned per team from the
+ * match seed — both sides carry both doctrines.
+ */
+export type Doctrine = 'flanker' | 'rusher';
+
 export type AIStateName =
   | 'assemble'
   | 'patrol'
   | 'alert'
   | 'engage'
+  | 'flank' // AI-01: the flanker's post-shot disengage window (cover hold)
   | 'retreat'
   | 'search'
   | 'cautious'
@@ -149,6 +159,24 @@ export type AIStateName =
 
 export interface AIState {
   state: AIStateName;
+  /** AI-01: strategic personality ('flanker' / 'rusher'), seed-assigned. */
+  doctrine: Doctrine;
+  /** AI-01 flanker: logic time at which the current disengage window ends. */
+  flankUntil: number;
+  /** Logic time this unit entered 'retreat' (livelock dwell guard). */
+  retreatSince: number;
+  /** Generic anti-stall bookkeeping: position/time when the last real
+   *  progress was made. If < 0.5m of progress for 2.5s, the current plan is
+   *  dropped so a fresh (reachable) waypoint is picked. */
+  stuckSince: number;
+  stuckX: number;
+  stuckZ: number;
+  /** Corner-slide: while a jam episode is active, the desired velocity is
+   *  rotated by this sign so the unit steers TANGENTIALLY around whatever
+   *  corner it is pressed against instead of re-ramming it. */
+  slideSign: -1 | 0 | 1;
+  slideUntil: number;
+  clearSince: number; // war mode: lane-hunt started at this time (0 = not hunting)
   stateUntil: number;
   path: number[]; // nav node indices to follow
   pathIndex: number;

@@ -101,6 +101,7 @@ const CSS = `
 .nb-debug .ai{display:flex;gap:5px;white-space:nowrap;}
 .nb-debug .ai .id{width:34px;opacity:.7;flex:none;}
 .nb-debug .ai .st{width:44px;color:#cfe0ff;flex:none;}
+.nb-debug .ai .dc{width:30px;color:#ffd28a;flex:none;}
 .nb-debug .ai .t{width:26px;flex:none;}
 .nb-debug .ai .ls{opacity:.6;}
 
@@ -617,9 +618,10 @@ export class HUD {
     for (const u of match.units) {
       if (u.isPlayer) continue;
       const st = u.ai?.state ?? '—';
+      const dc = u.ai?.doctrine === 'flanker' ? 'flank' : 'rush';
       const tgt = u.ai?.targetId ?? -1;
       const ls = u.ai?.lastSeenPos ? `${u.ai.lastSeenPos.x.toFixed(1)},${u.ai.lastSeenPos.z.toFixed(1)}` : '·';
-      ai += `<div class="ai"><span class="id">${u.name.slice(0, 3)}</span><span class="st">${st}</span><span class="t">${tgt >= 0 ? 'T' + tgt : '·'}</span><span class="ls">${ls}</span></div>`;
+      ai += `<div class="ai"><span class="id">${u.name.slice(0, 3)}</span><span class="st">${st}</span><span class="dc">${dc}</span><span class="t">${tgt >= 0 ? 'T' + tgt : '·'}</span><span class="ls">${ls}</span></div>`;
     }
     const aliveUnits = match.units.filter((u) => u.alive).length;
     const html =
@@ -627,7 +629,8 @@ export class HUD {
       `<div class="row"><span class="k">FPS</span><span class="v">${this.fpsEl.textContent}</span><span class="k">P</span><span>${aliveUnits}</span><span class="k">FX</span><span>${this.stats.activeParticles}</span></div>` +
       `<div class="row"><span class="k">BLUE</span><span>${blueAlive}</span><span class="k">RED</span><span>${redAlive}</span></div>` +
       `<div class="row"><span class="k">AI</span><span style="white-space:nowrap">${distStr}</span></div>` +
-      `<hr>${ai}`;
+      `<hr>${ai}` +
+      `<div class="row" style="opacity:.55"><span style="white-space:nowrap">dc: flank=迂回 · rush=猛攻</span></div>`;
     if (html !== this.lastDebug) {
       this.debugEl.innerHTML = html;
       this.lastDebug = html;
