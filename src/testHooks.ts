@@ -5,6 +5,7 @@
 
 import type { App } from './app';
 import type { Vec3 } from './game/types';
+import * as THREE from 'three';
 
 export interface TeamArenaTestHooks {
   version: string;
@@ -52,6 +53,12 @@ export interface TeamArenaTestHooks {
    *  contain? The bullet is removed again before returning, so the match
    *  state is untouched. */
   probeTrailWarmGold: () => number;
+  /** FX-05: with ONLY the given FX pool visible against a pure black
+   *  backdrop, how many dark-red pixels (`darkRed`: R clearly above G and
+   *  B, overall dark — blood) and bright warm pixels (`warm`: additive
+   *  gold — sparks) does one rendered frame aimed at `point` contain?
+   *  Scene state is restored before returning. */
+  probeImpact: (point: Vec3, kind: 'blood' | 'sparks') => { darkRed: number; warm: number };
   forceSpectate: () => void;
   repaintHud: () => void;
 }
@@ -112,6 +119,8 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
       app.match.bullets.clear();
       return n;
     },
+    probeImpact: (point, kind) =>
+      app.renderer.probeImpactPixels(new THREE.Vector3(point.x, point.y, point.z), kind),
     forceSpectate: () => app.forceSpectate(),
     repaintHud: () => app.repaintHud(),
   };

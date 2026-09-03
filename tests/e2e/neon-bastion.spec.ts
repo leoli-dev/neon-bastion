@@ -99,6 +99,11 @@ type Hooks = {
   /** FX-04: warm-gold (0xffe08a family) pixels in one frame with a single
    *  in-flight bullet flying at the probe camera (bullet removed after). */
   probeTrailWarmGold: () => number;
+  /** FX-05: one frame with ONLY the given FX pool visible against a black
+   *  backdrop, aimed at `point` — `darkRed` (R clearly above G/B, overall
+   *  dark = blood) and `warm` (bright warm = additive sparks) pixel counts.
+   *  Scene state is restored before returning. */
+  probeImpact: (point: { x: number; y: number; z: number }, kind: 'blood' | 'sparks') => { darkRed: number; warm: number };
   forceSpectate: () => void;
   repaintHud: () => void;
 };
@@ -1394,4 +1399,71 @@ test('16: FX-04 bullet trail has real on-screen width (not a 1px line)', async (
   // CONFIG.bulletTrailWidth temporarily set to ~0 the disc collapses and the
   // probe returns 0, failing this assertion.
   expect(n, 'trail must contain many warm-gold pixels (1px-line baseline was 0)').toBeGreaterThanOrEqual(16);
+});
+
+// ---------------------------------------------------------------------------
+// FX-05: hitting a UNIT sprays dark red blood (normal blending, R clearly
+// above G/B, overall dark, falling under gravity); hitting a WALL/ground
+// throws light warm ADDITIVE sparks — fast, bright, gone quickly. Two
+// independent pools, two clearly distinct looks (previously one spark pool
+// did both, so a body hit and a wall hit read as the same effect).
+test('17: FX-05 unit hit bleeds dark red, wall hit sparks warm (distinct FX)', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page);
+
+  // Everything in ONE evaluate: shootImmediate resolves the projectile
+  // synchronously, so by the time it returns the 'impact' event has fired
+  // and the matching FX pool is populated — no race with the rAF loop.
+  const fx = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.start();
+    type R = { fired: boolean; kind: string | null; point: { x: number; y: number; z: number } | null };
+    const mk = (res: unknown): R => {
+      const r = res as { fired: boolean; resolution: { kind: string; point: { x: number; y: number; z: number } } | null };
+      return { fired: r.fired, kind: r.resolution?.kind ?? null, point: r.resolution?.point ?? null };
+    };
+    t.teleport(0, 0, 20); // spawn yaw π = facing -Z, clear central lane
+    t.teleport(4, 0, 18); // red unit 2 m straight ahead
+    [5, 6, 7].forEach((id) => t.teleport(id, -26, -24)); // park the rest out of the lane
+
+    // 1) UNIT hit -> blood pool.
+    const unitShot = mk(t.shoot({ x: 0, y: 0, z: -1 }));
+    const blood = unitShot.point ? t.probeImpact(unitShot.point, 'blood') : { darkRed: -1, warm: -1 };
+
+    // Respect the 1/s fire interval between the two shots.
+    t.fastForward(1.1);
+
+    // 2) WALL hit -> spark pool: pull the unit out of the lane so this
+    //    bullet lands on the central cover column (front face z=14.5).
+    t.teleport(4, -14, -16);
+    const wallShot = mk(t.shoot({ x: 0, y: 0, z: -1 }));
+    const sparks = wallShot.point ? t.probeImpact(wallShot.point, 'sparks') : { darkRed: -1, warm: -1 };
+
+    return { unitShot, blood, wallShot, sparks };
+  });
+  console.log('FX05 PROBE', JSON.stringify(fx));
+
+  // Unit hit: dark-red blood pixels (R clearly above G and B, overall dark),
+  // and NO bright warm pixels — blood is dark and normal-blended.
+  expect(fx.unitShot.fired, 'the first shot must fire').toBe(true);
+  expect(fx.unitShot.kind, 'the first bullet must land on the unit, not a wall or a miss').toBe('unit');
+  expect(
+    fx.blood.darkRed,
+    `unit hit -> dark-red blood pixels (got ${fx.blood.darkRed}, want >= 30)`
+  ).toBeGreaterThanOrEqual(30);
+  expect(fx.blood.warm, 'blood must not register as bright warm pixels').toBe(0);
+
+  // Wall hit: bright warm additive spark pixels, and NO dark-red blood.
+  expect(fx.wallShot.fired, 'the second shot must fire').toBe(true);
+  expect(fx.wallShot.kind, 'the second bullet must land on the cover wall').toBe('wall');
+  expect(
+    fx.sparks.warm,
+    `wall hit -> warm bright spark pixels (got ${fx.sparks.warm}, want >= 30)`
+  ).toBeGreaterThanOrEqual(30);
+  expect(fx.sparks.darkRed, 'wall hit -> sparks only, no dark-red blood').toBe(0);
+
+  await page.screenshot({ path: 'screenshots/17-fx05-impact.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

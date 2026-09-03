@@ -22,6 +22,7 @@ import { CONFIG } from '../game/constants';
 import { MAX_BULLETS } from '../game/combat/bullet';
 import { eyeOf } from '../game/combat/hitscan';
 import { sharedViewCanSee } from '../game/ai/aiPerception';
+import { FxPool } from './fxpools';
 
 // Team identity colours. Cyan blue vs magenta red: ~158° apart on the hue
 // wheel, both fully saturated, sitting on a desaturated ~210°/8% environment.
@@ -40,6 +41,11 @@ const RED = { body: 0xff3d63, head: 0xffc9d4, emissive: 0x8a1530, ring: 0xff3d63
 // real thickness from every viewing angle — including dead-on (a billboard
 // streak degenerates to nothing exactly when a bullet flies at you) — and
 // cost no per-frame camera-matrix math.
+// FX-05: blood palette — dark reds inside the 0x8a1220–0xc41e2a band the
+// design brief asked for. Readable hit feedback on a low-poly arena, not
+// gory: a few discrete shades the per-droplet pick from.
+const BLOOD_COLORS = [0x8a1220, 0xa31523, 0xc41e2a];
+
 const TRAIL_UP = new THREE.Vector3(0, 1, 0); // cylinder axis before alignment
 const TRAIL_CORE_OPACITY = 0.95; // bright core
 const TRAIL_HALO_OPACITY = 0.35; // soft edge
@@ -114,6 +120,15 @@ interface Spark {
   vel: THREE.Vector3;
 }
 
+/** FX-05: one blood droplet (independent pool from the wall sparks). */
+interface Blood {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  life: number;
+  max: number;
+  vel: THREE.Vector3;
+}
+
 export class Renderer {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -127,8 +142,14 @@ export class Renderer {
   private tracers: Tracer[] = [];
   private bulletTrails: BulletTrail[] = [];
   private muzzles: Muzzle[] = [];
-  private sparks: Spark[] = [];
+  // FX-05: impact FX are two INDEPENDENT pools (shared pure bookkeeping in
+  // fxpools.ts): wall/ground = warm additive sparks, unit hits = dark
+  // normal-blended blood. Each has its own capacity and lifetime (CONFIG).
+  private sparks = new FxPool<Spark>([]);
+  private bloods = new FxPool<Blood>([]);
+  private ground!: THREE.Mesh; // ART-06 sand plane (probeImpactPixels hides it)
   private sparkGeo: THREE.BoxGeometry;
+  private bloodGeo: THREE.BoxGeometry;
   private muzzleGeo: THREE.SphereGeometry;
   /** FX-04: shared unit trail geometry — a cylinder of diameter 1 and
    *  height 1 along +Y, capped. Each pooled slot scales it to
@@ -190,6 +211,7 @@ export class Renderer {
     this.minimap = minimapCanvas.getContext('2d')!;
     this.minimapSize = minimapCanvas.width;
     this.sparkGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
+    this.bloodGeo = new THREE.BoxGeometry(1, 1, 1); // unit cube: scaled per droplet
     this.muzzleGeo = new THREE.SphereGeometry(0.1, 8, 8);
     // 8 radial segments for a round silhouette; CLOSED ends are important:
     // a bullet flying straight at the camera is seen dead-on, where an
@@ -205,7 +227,8 @@ export class Renderer {
     this.buildTracerPool(40);
     this.buildBulletTrailPool(MAX_BULLETS);
     this.buildMuzzlePool(12);
-    this.buildSparkPool(48);
+    this.buildSparkPool(CONFIG.sparkPoolSize);
+    this.buildBloodPool(CONFIG.bloodPoolSize);
     this.resize();
   }
 
@@ -458,6 +481,7 @@ export class Renderer {
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = 0;
     this.scene.add(ground);
+    this.ground = ground; // kept for the FX-05 probe (probeImpactPixels)
 
     this.buildArenaSolids(map);
   }
@@ -654,7 +678,19 @@ export class Renderer {
       const mesh = new THREE.Mesh(this.sparkGeo, mat);
       mesh.visible = false;
       this.scene.add(mesh);
-      this.sparks.push({ mesh, mat, life: 0, max: CONFIG.sparkLife, vel: new THREE.Vector3() });
+      this.sparks.slots.push({ mesh, mat, life: 0, max: CONFIG.sparkLife, vel: new THREE.Vector3() });
+    }
+  }
+
+  /** FX-05: blood pool — NORMAL blending and opaque: dark blood must stay
+   *  dark, and additive blending would brighten it into a pink glow. */
+  private buildBloodPool(n: number): void {
+    for (let i = 0; i < n; i++) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0xa31523, transparent: true, opacity: 0 });
+      const mesh = new THREE.Mesh(this.bloodGeo, mat);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.bloods.slots.push({ mesh, mat, life: 0, max: CONFIG.bloodLife, vel: new THREE.Vector3() });
     }
   }
 
@@ -700,30 +736,58 @@ export class Renderer {
     m.mesh.visible = true;
   }
 
-  private sparkCursor = 0;
-  /** FX-01: impact sparks for unit hits AND wall hits (walls used to get none). */
-  spawnHitSpark(point: THREE.Vector3, kind: 'head' | 'body' | 'wall'): void {
-    if (kind === 'wall') {
-      // cool, neutral shards — distinct from the warm unit-hit feedback
-      const n = 4 * (this.reducedMotion ? 0.5 : 1);
-      for (let i = 0; i < n; i++) {
-        const s = this.sparks[this.sparkCursor++ % this.sparks.length];
-        s.mesh.position.copy(point);
-        s.mat.color.setHex(0x9fb4d8);
-        s.life = s.max = CONFIG.sparkLife;
-        s.vel.set((Math.random() - 0.5) * 5, Math.random() * 4, (Math.random() - 0.5) * 5);
-        s.mesh.visible = true;
-      }
-      return;
-    }
-    const n = (kind === 'head' ? 5 : 3) * (this.reducedMotion ? 0.5 : 1);
+  /** FX-05: WALL/GROUND impact = light warm ADDITIVE sparks. They burst
+   *  outward with a little upward bias and die fast (CONFIG.sparkLife) —
+   *  the fast, bright, additive half of the impact family. Shards start
+   *  from a small scatter around the exact hit point (a real impact kisses
+   *  a patch of surface, not a mathematical point — and it keeps the
+   *  additive shards from stacking into a single over-saturated white blob).
+   */
+  spawnWallSparks(point: THREE.Vector3): void {
+    const n = Math.floor(CONFIG.sparkCount * (this.reducedMotion ? 0.5 : 1));
     for (let i = 0; i < n; i++) {
-      const s = this.sparks[this.sparkCursor++ % this.sparks.length];
-      s.mesh.position.copy(point);
-      s.mat.color.setHex(kind === 'head' ? 0xffd24a : 0xff5a5a);
-      s.life = s.max = this.reducedMotion ? CONFIG.sparkLife * 0.5 : CONFIG.sparkLife;
-      s.vel.set((Math.random() - 0.5) * 6, Math.random() * 5, (Math.random() - 0.5) * 6);
+      const s = this.sparks.acquire();
+      s.mesh.position.set(
+        point.x + (Math.random() - 0.5) * 0.16,
+        point.y + (Math.random() - 0.5) * 0.16,
+        point.z + (Math.random() - 0.5) * 0.16,
+      );
+      s.mat.color.setHex(0xffd24a);
+      s.life = s.max = CONFIG.sparkLife;
+      s.mat.opacity = 1; // live from the spawn frame (update() re-derives the fade)
+      s.vel.set(
+        (Math.random() - 0.5) * 2 * CONFIG.sparkSpeed,
+        Math.random() * CONFIG.sparkUpSpeed,
+        (Math.random() - 0.5) * 2 * CONFIG.sparkSpeed,
+      );
       s.mesh.visible = true;
+    }
+  }
+
+  /** FX-05: UNIT impact = dark red BLOOD. Droplets continue the bullet's
+   *  direction with a small random spread, then fall under a heavier
+   *  gravity and linger longer than the wall sparks (CONFIG.blood*). Normal
+   *  blending (dark on top of the scene, never additive). Headshots spawn
+   *  more droplets and make them bigger. */
+  spawnBlood(point: THREE.Vector3, dir: THREE.Vector3, part: 'head' | 'body'): void {
+    const isHead = part === 'head';
+    const n = Math.floor((isHead ? CONFIG.bloodCountHead : CONFIG.bloodCountBody) * (this.reducedMotion ? 0.5 : 1));
+    const d = dir.clone();
+    if (d.lengthSq() < 1e-8) d.set(0, 0, -1);
+    else d.normalize();
+    for (let i = 0; i < n; i++) {
+      const b = this.bloods.acquire();
+      b.mesh.position.copy(point);
+      b.mesh.scale.setScalar(CONFIG.bloodSize * (isHead ? CONFIG.bloodHeadSizeMult : 1) * (0.8 + Math.random() * 0.5));
+      b.mat.color.setHex(BLOOD_COLORS[(Math.random() * BLOOD_COLORS.length) | 0]);
+      b.vel.set(
+        d.x * CONFIG.bloodSpeed + (Math.random() - 0.5) * CONFIG.bloodSpread,
+        d.y * CONFIG.bloodSpeed + (Math.random() - 0.5) * CONFIG.bloodSpread * 0.6 + 0.4,
+        d.z * CONFIG.bloodSpeed + (Math.random() - 0.5) * CONFIG.bloodSpread,
+      );
+      b.life = b.max = CONFIG.bloodLife * (0.7 + Math.random() * 0.6);
+      b.mat.opacity = 1;
+      b.mesh.visible = true;
     }
   }
 
@@ -794,18 +858,31 @@ export class Renderer {
         m.mesh.scale.setScalar(0.6 + (1 - k) * 1.4);
       }
     }
-    // Sparks
-    for (const s of this.sparks) {
+    // FX-05: wall sparks — light, outward, fading fast (additive gold).
+    // Lifetime bookkeeping (countdown + one-shot expiry) lives in the pool;
+    // this loop only integrates motion and fade.
+    this.sparks.step(dt, (s) => {
+      s.mesh.visible = false;
+      s.mat.opacity = 0;
+    });
+    for (const s of this.sparks.slots) {
       if (s.life <= 0) continue;
-      s.life -= dt;
-      if (s.life <= 0) {
-        s.mesh.visible = false;
-        s.mat.opacity = 0;
-      } else {
-        s.mesh.position.addScaledVector(s.vel, dt);
-        s.vel.y -= 12 * dt;
-        s.mat.opacity = s.life / s.max;
-      }
+      s.mesh.position.addScaledVector(s.vel, dt);
+      s.vel.y -= CONFIG.sparkGravity * dt;
+      s.mat.opacity = s.life / s.max;
+    }
+    // FX-05: blood — heavier: keeps moving along the bullet path, falls
+    // under stronger gravity, lingers, and only fades in its final stretch.
+    this.bloods.step(dt, (b) => {
+      b.mesh.visible = false;
+      b.mat.opacity = 0;
+    });
+    for (const b of this.bloods.slots) {
+      if (b.life <= 0) continue;
+      b.mesh.position.addScaledVector(b.vel, dt);
+      b.vel.y -= CONFIG.bloodGravity * dt;
+      const k = b.life / b.max;
+      b.mat.opacity = Math.min(1, k / 0.35); // solid, then fade out
     }
 
     // ART-05: drift the clouds (no-op under reduced motion).
@@ -817,12 +894,10 @@ export class Renderer {
 
   /** Number of live effects — feeds the debug panel's "active particles". */
   getStats(): { activeParticles: number; activeTracers: number } {
-    let parts = 0;
     let tracers = 0;
-    for (const s of this.sparks) if (s.life > 0) parts++;
-    for (const m of this.muzzles) if (m.life > 0) parts++;
     for (const t of this.tracers) if (t.life > 0) tracers++;
-    return { activeParticles: parts + tracers, activeTracers: tracers };
+    const particles = this.sparks.countAlive() + this.bloods.countAlive() + this.muzzles.filter((m) => m.life > 0).length;
+    return { activeParticles: particles + tracers, activeTracers: tracers };
   }
 
   /** Project a world point to CSS pixels (for floating damage numbers). */
@@ -1108,6 +1183,73 @@ export class Renderer {
     this.sky.visible = true;
     this.cloudGroup.visible = true;
     return n;
+  }
+
+  /** FX-05 E2E hook: with ONLY the given FX pool visible against a pure
+   *  black backdrop (sky, clouds, arena, ground, units and the OTHER pool
+   *  temporarily hidden; everything restored before returning), render ONE
+   *  frame with a camera parked 6 units from `point` looking at it, and
+   *  classify the pixels:
+   *   darkRed: R clearly above G and B AND overall dark (luma < 128) —
+   *             the normal-blended dark-red blood family
+   *   warm:    bright (luma >= 120) with blue clearly below red/green —
+   *             the additive gold spark family (same test as the FX-04
+   *             trail probe)
+   *  The scene state and camera are harmless to leave: the next update()
+   *  re-derives unit visibility and the camera pose. */
+  probeImpactPixels(point: THREE.Vector3, kind: 'blood' | 'sparks'): { darkRed: number; warm: number } {
+    const bg = this.scene.background as THREE.Color;
+    const hidden: THREE.Object3D[] = [];
+    const hide = (o: THREE.Object3D | null | undefined): void => {
+      if (o && o.visible) {
+        o.visible = false;
+        hidden.push(o);
+      }
+    };
+    hide(this.sky);
+    hide(this.cloudGroup);
+    hide(this.arenaGroup);
+    hide(this.ground);
+    for (const u of this.units) {
+      hide(u.group);
+      hide(u.ring);
+    }
+    for (const t of this.tracers) {
+      hide(t.core);
+      hide(t.halo);
+    }
+    for (const t of this.bulletTrails) {
+      hide(t.core);
+      hide(t.halo);
+    }
+    for (const m of this.muzzles) hide(m.mesh);
+    if (kind === 'blood') {
+      for (const s of this.sparks.slots) hide(s.mesh);
+    } else {
+      for (const b of this.bloods.slots) hide(b.mesh);
+    }
+    this.scene.background = new THREE.Color(0x000000);
+    this.camera.position.set(point.x, point.y + 0.5, point.z + 6);
+    this.camera.lookAt(point);
+    this.renderer.render(this.scene, this.camera);
+    const gl = this.renderer.domElement;
+    const c = document.createElement('canvas');
+    c.width = gl.width;
+    c.height = gl.height;
+    const ctx = c.getContext('2d')!;
+    ctx.drawImage(gl, 0, 0);
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let darkRed = 0;
+    let warm = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      if (r > 60 && r > g + 45 && r > b + 30 && luma < 128) darkRed++;
+      if (luma >= 120 && Math.min(r, g) >= b + 15) warm++;
+    }
+    for (const o of hidden) o.visible = true;
+    this.scene.background = bg;
+    return { darkRed, warm };
   }
 
   resize(): void {

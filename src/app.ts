@@ -326,8 +326,15 @@ export class App {
       const res = e.res.resolution;
       if (!res) return;
       const toV = new THREE.Vector3(res.point.x, res.point.y, res.point.z);
-      if (res.kind === 'unit') this.renderer.spawnHitSpark(toV, e.res.part === 'head' ? 'head' : 'body');
-      else if (res.kind === 'wall') this.renderer.spawnHitSpark(toV, 'wall');
+      if (res.kind === 'unit') {
+        // FX-05: unit hits bleed — dark-red droplets continue the bullet's
+        // own direction (the shot's spread direction, `e.res.aim`), falling
+        // under gravity. Wall hits instead get light warm additive sparks.
+        const dir = e.res.aim ?? { x: Math.sin(p.yaw), y: 0, z: Math.cos(p.yaw) };
+        this.renderer.spawnBlood(toV, new THREE.Vector3(dir.x, dir.y, dir.z), e.res.part === 'head' ? 'head' : 'body');
+      } else if (res.kind === 'wall') {
+        this.renderer.spawnWallSparks(toV);
+      }
       if (e.shooterId === 0 && res.kind === 'unit') {
         this.audio.hit(e.res.part === 'head');
         // Player feedback: hitmarker + floating damage number at the impact.

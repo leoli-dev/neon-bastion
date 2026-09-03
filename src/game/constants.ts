@@ -131,6 +131,26 @@ export const CONFIG = {
   tracerLife: 0.18, // ~11 frames at 60fps — long enough to be perceived
   sparkLife: 0.22,
   muzzleLife: 0.05, // a flash is a flash: a few frames
+  // FX-05: wall/ground impact SPARKS — light, warm, ADDITIVE gold shards
+  // that burst outward and fade fast. Own pool, own budget.
+  sparkPoolSize: 48, // max simultaneously live spark slots
+  sparkCount: 4, // shards per wall impact (halved under reduced motion)
+  sparkSpeed: 5, // outward (X/Z) initial speed (units/s)
+  sparkUpSpeed: 4, // initial upward speed (units/s)
+  sparkGravity: 12, // downward acceleration (units/s^2)
+  // FX-05: unit-hit BLOOD — dark red, NORMAL blending (never additive: dark
+  // blood additively blended washes into a bright pink glow). Droplets keep
+  // the bullet's direction + a small random spread, then fall — heavier
+  // (longer-lived, stronger gravity) and slower than the wall sparks.
+  bloodPoolSize: 64, // max simultaneously live blood slots
+  bloodCountBody: 7, // droplets per body hit
+  bloodCountHead: 14, // droplets per head hit (more AND bigger)
+  bloodSpeed: 5.2, // forward initial speed along the bullet direction
+  bloodSpread: 2.6, // random spread added around the bullet direction
+  bloodLife: 0.55, // longer than sparkLife: blood lingers, then drops out
+  bloodGravity: 20, // heavier fall than the sparks
+  bloodSize: 0.15, // droplet edge length (units)
+  bloodHeadSizeMult: 1.5, // headshot droplets are bigger
 };
 
 export type Config = typeof CONFIG;
