@@ -10,6 +10,7 @@ import { CONFIG } from './game/constants';
 import { Renderer } from './render/renderer';
 import { HUD } from './render/hud';
 import { Audio } from './game/audio';
+import { FootstepTracker } from './game/footstep';
 import { eyeOf, type FireResult } from './game/combat/hitscan';
 import { groundHeight, losClear, pointInSolidXZ } from './game/map/geometry';
 import { createTestHooks } from './testHooks';
@@ -53,6 +54,10 @@ export class App {
   hud: HUD;
   audio: Audio;
   seed: number;
+  /** AUD-01: drives the player's distance-based footstep cadence. */
+  private footstep: FootstepTracker;
+  /** Player XZ position at the last footstep sample (for delta distance). */
+  private lastStepPos = { x: 0, z: 0 };
 
   private appEl: HTMLElement;
   private webglCanvas: HTMLCanvasElement;
@@ -98,6 +103,8 @@ export class App {
     this.renderer.buildUnits(this.match.units);
     this.hud = new HUD(this.appEl);
     this.audio = new Audio();
+    this.footstep = new FootstepTracker();
+    this.lastStepPos = { x: this.match.player.pos.x, z: this.match.player.pos.z };
 
     // Reduced-motion: drop tracers / auto-orbiting cameras and decorative CSS.
     this.applyReducedMotion();
@@ -133,6 +140,7 @@ export class App {
     this.match = new Match(this.seed);
     this.renderer.setMap(this.match.map);
     this.match.onEvent = (e) => this.onEvent(e);
+    this.resetFootstep();
   }
 
   /** Pin the seed and regenerate everything from it (used by the E2E seed
@@ -369,6 +377,7 @@ export class App {
         this.match.tick(TICK);
         this.acc -= TICK;
         steps++;
+        this.stepFootstep();
       }
       if (steps >= 5) this.acc = 0;
     }
@@ -425,12 +434,43 @@ export class App {
     u.vel.z = 0;
     u.vy = 0;
     u.grounded = true;
+    if (unitId === 0) this.resetFootstep();
   }
 
   fastForward(seconds: number): void {
     if (this.match.state !== 'running') return;
     const n = Math.floor(seconds / TICK);
-    for (let i = 0; i < n; i++) this.match.tick(TICK);
+    for (let i = 0; i < n; i++) {
+      this.match.tick(TICK);
+      this.stepFootstep();
+    }
+  }
+
+  /** AUD-01: total player footstep triggers fired since the last reset. */
+  footstepCount(): number {
+    return this.footstep.count;
+  }
+
+  /** AUD-01: re-sync the footstep tracker's baseline position (e.g. after a
+   *  spawn / reseed / teleport) so a jump in position isn't read as walking. */
+  private resetFootstep(): void {
+    const p = this.match.player;
+    this.lastStepPos = { x: p.pos.x, z: p.pos.z };
+    this.footstep.reset();
+  }
+
+  /** AUD-01: sample the player's horizontal movement for this tick and fire a
+   *  footstep sound when the distance-based cadence trips. Player-only, and
+   *  gated on being grounded (airborne is silent; a landing is a heavier thump
+   *  handled inside the tracker). */
+  private stepFootstep(): void {
+    const p = this.match.player;
+    if (!p.alive) return;
+    const movedXZ = Math.hypot(p.pos.x - this.lastStepPos.x, p.pos.z - this.lastStepPos.z);
+    this.lastStepPos.x = p.pos.x;
+    this.lastStepPos.z = p.pos.z;
+    const trig = this.footstep.tick(movedXZ, p.grounded, this.match.playerInput.sprint);
+    if (trig) this.audio.footstep(trig.intensity);
   }
 
   /** ART-06 E2E hook: find a spot straight ahead of the player that is (a) not

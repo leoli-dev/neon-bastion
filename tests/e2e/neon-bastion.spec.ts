@@ -87,6 +87,8 @@ type Hooks = {
   findCenterViewSpot: () => { x: number; z: number } | null;
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
+  /** AUD-01: how many player footstep triggers have fired since spawn/reseed. */
+  footstepCount: () => number;
   forceSpectate: () => void;
   repaintHud: () => void;
 };
@@ -1105,6 +1107,61 @@ test('11: ART-06 daylight arena — measurable brightness floor, no over-warm ca
   ).toBeGreaterThan(40);
 
   await page.screenshot({ path: 'screenshots/11-daylight.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+test('12: AUD-01 footstep — walking increments the trigger counter, standing still does not', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page);
+
+  // We do NOT assert on the sound itself (headless AudioContext never runs and
+  // audio is intentionally environment/cue-quiet). Instead we assert on the
+  // pure trigger counter exposed on the test hooks: it must grow with
+  // distance travelled while grounded, and stop growing when the player stands
+  // still.
+  const res = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.start();
+    t.teleport(0, -3, 24); // clear south lane, facing north
+    const baseline = t.footstepCount();
+
+    // Walk a distance: holding W for 1.5s covers several strides at walk speed.
+    t.input('KeyW', true);
+    t.fastForward(1.5);
+    t.input('KeyW', false);
+    const afterMove = t.footstepCount();
+    const movedZ = t.state().units[0].pos.z;
+
+    // Now stand still: no input, advance the sim again — the counter must NOT
+    // grow while the player is not moving.
+    t.fastForward(1.5);
+    const afterStill = t.footstepCount();
+    const stillZ = t.state().units[0].pos.z;
+
+    return { baseline, afterMove, afterStill, movedZ, stillZ };
+  });
+
+  // The player actually travelled (so the trigger has real distance to spend).
+  expect(res.movedZ, 'holding W should move the player forward').toBeLessThan(24 - 1);
+
+  expect(
+    res.afterMove - res.baseline,
+    'walking a distance while grounded must fire footstep triggers'
+  ).toBeGreaterThan(0);
+
+  expect(
+    res.stillZ,
+    'releasing W should stop the player'
+  ).toBeCloseTo(res.movedZ, 0);
+
+  expect(
+    res.afterStill,
+    'standing still must not fire any further footstep triggers'
+  ).toBe(res.afterMove);
+
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });

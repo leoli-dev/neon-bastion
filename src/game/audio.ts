@@ -75,6 +75,21 @@ export class Audio {
     src.stop(t + dur + 0.02);
   }
 
+  /** Footstep (AUD-01): a short, dry "scuff" of sand — the shared white-noise
+   *  buffer through a narrow bandpass centred in the 2–4 kHz range with a very
+   *  short (60–120 ms) decay. Deliberately QUIET (ambient, never a cue — well
+   *  below a gunshot) and randomly nudged in frequency + level + length per
+   *  call so consecutive steps never sound mechanically identical. `intensity`
+   *  0..1 (sprint / landing are louder than a plain walk step). */
+  footstep(intensity: number): void {
+    if (!this.ready || !this.enabled) return;
+    const v = Math.max(0.03, Math.min(1, intensity));
+    const freq = 2200 + Math.random() * 1600; // 2.2–3.8 kHz band centre
+    const vol = 0.12 * v * (0.8 + Math.random() * 0.4); // far below a gunshot
+    const dur = 0.06 + Math.random() * 0.06; // 60–120 ms tail
+    this.noise(vol, dur, freq, 1.4);
+  }
+
   /** Gunshot. `vol` 0..1 (distance-attenuated). */
   shot(vol: number): void {
     if (!this.ready || !this.enabled) return;

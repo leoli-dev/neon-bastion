@@ -32,6 +32,9 @@ export interface TeamArenaTestHooks {
   fastForwardSky: (seconds: number) => void;
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
+  /** AUD-01: how many player footstep triggers have fired since the last
+   *  spawn/reseed (grows only while grounded and moving). */
+  footstepCount: () => number;
   /** ART-06: a sight-clear spot on the player's facing that lands in the
    *  central screen band (null if none exists on this seed). */
   findCenterViewSpot: () => { x: number; z: number } | null;
@@ -69,6 +72,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     fastForwardSky: (seconds) => app.renderer.stepSky(seconds),
     teleport: (unitId, x, z) => app.teleport(unitId, x, z),
     fastForward: (seconds) => app.fastForward(seconds),
+    footstepCount: () => app.footstepCount(),
     findCenterViewSpot: () => app.findCenterViewSpot(),
     forceSpectate: () => app.forceSpectate(),
     repaintHud: () => app.repaintHud(),
