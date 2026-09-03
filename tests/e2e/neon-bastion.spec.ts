@@ -96,6 +96,9 @@ type Hooks = {
   bgmMuted: () => boolean;
   /** AUD-02: true while the BGM scheduler is running. */
   bgmPlaying: () => boolean;
+  /** FX-04: warm-gold (0xffe08a family) pixels in one frame with a single
+   *  in-flight bullet flying at the probe camera (bullet removed after). */
+  probeTrailWarmGold: () => number;
   forceSpectate: () => void;
   repaintHud: () => void;
 };
@@ -1362,4 +1365,33 @@ test('15: ART-07 sand repeat — mottling wraps the tile edge, no right-angle se
 
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+test('16: FX-04 bullet trail has real on-screen width (not a 1px line)', async ({ page }) => {
+  await ready(page);
+  await pinSeed(page);
+  const n = await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.start();
+    return t.probeTrailWarmGold();
+  });
+  console.log('FX04 WARM-GOLD PIXELS', n);
+  // FX-04 acceptance. The probe (see probeTrailWarmGold) renders one frame
+  // with a single in-flight bullet flying AT the camera, backdrop forced
+  // black so only the trail can be warm gold, and counts bright warm-gold
+  // (0xffe08a family, ACES-compressed) pixels:
+  //   * BEFORE this change (THREE.Line + LineBasicMaterial): 0 pixels —
+  //     WebGL rasterizes line primitives at 1 px no matter the linewidth,
+  //     so the hairline produced no qualifying pixels at all (deterministic
+  //     across runs, headless SwiftShader, 1280x720).
+  //   * AFTER (two-layer capped cylinder, CONFIG.bulletTrailWidth = 0.10):
+  //     74 pixels — the end-on bright disc of the trail, several-fold the
+  //     baseline. The assertion pins an absolute floor (any multiple of a
+  //     zero baseline is zero, so the floor IS the "several-fold" check):
+  //     a ~12 px-wide warm-gold disc (~74 px) vs. the hairline's 0.
+  // Negative control (verified before committing): with
+  // CONFIG.bulletTrailWidth temporarily set to ~0 the disc collapses and the
+  // probe returns 0, failing this assertion.
+  expect(n, 'trail must contain many warm-gold pixels (1px-line baseline was 0)').toBeGreaterThanOrEqual(16);
 });

@@ -123,6 +123,11 @@ export const CONFIG = {
 
   // --- Particles (all consumed by the renderer's effect pools) -------------
   bulletTrail: 1.1, // length (units) of the short trail drawn behind an in-flight bullet
+  // FX-04: true on-screen WIDTH of the trail/tracer (units). THREE.Line was
+  // 1px no matter what (WebGL ignores linewidth), so the trails are now thin
+  // cylinders this wide — 0.09–0.10 units is a clearly visible ~2–3 px streak
+  // at a 20–30 unit firefight, not a hairline.
+  bulletTrailWidth: 0.10,
   tracerLife: 0.18, // ~11 frames at 60fps — long enough to be perceived
   sparkLife: 0.22,
   muzzleLife: 0.05, // a flash is a flash: a few frames

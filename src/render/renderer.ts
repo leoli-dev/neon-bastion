@@ -28,6 +28,23 @@ import { sharedViewCanSee } from '../game/ai/aiPerception';
 const BLUE = { body: 0x18e0ff, head: 0xb8f6ff, emissive: 0x0a6e8c, ring: 0x18e0ff };
 const RED = { body: 0xff3d63, head: 0xffc9d4, emissive: 0x8a1530, ring: 0xff3d63 };
 
+// FX-04: tracers and bullet trails used to be THREE.Line + LineBasicMaterial,
+// but WebGL rasterizes line primitives at 1 px on virtually every platform
+// (linewidth is ignored — a documented Three.js/WebGL limitation), so no
+// opacity/length knob could ever make the ballistic visible as more than a
+// hairline. They are now thin two-layer CYLINDERS (diameter =
+// CONFIG.bulletTrailWidth, aligned with the flight direction via a
+// quaternion): a bright inner core and a wide, faint halo of the same warm
+// gold, so the centre reads hot and the edge stays soft instead of a solid
+// bar. Cylinders were chosen over camera-facing billboards because they keep
+// real thickness from every viewing angle — including dead-on (a billboard
+// streak degenerates to nothing exactly when a bullet flies at you) — and
+// cost no per-frame camera-matrix math.
+const TRAIL_UP = new THREE.Vector3(0, 1, 0); // cylinder axis before alignment
+const TRAIL_CORE_OPACITY = 0.95; // bright core
+const TRAIL_HALO_OPACITY = 0.35; // soft edge
+const TRAIL_HALO_MULT = 2.2; // halo diameter / core diameter
+
 // Arena palette: pure lightness steps, no hue. Each class is ~1.5x brighter
 // than the one before it, so cover (the thing you judge in a split second) is
 // the brightest architecture and the boundary recedes into the background.
@@ -67,15 +84,19 @@ interface UnitVisual {
 }
 
 interface Tracer {
-  line: THREE.Line;
-  mat: THREE.LineBasicMaterial;
+  core: THREE.Mesh;
+  halo: THREE.Mesh;
+  coreMat: THREE.MeshBasicMaterial;
+  haloMat: THREE.MeshBasicMaterial;
   life: number;
   max: number;
 }
 
 interface BulletTrail {
-  line: THREE.Line;
-  mat: THREE.LineBasicMaterial;
+  core: THREE.Mesh;
+  halo: THREE.Mesh;
+  coreMat: THREE.MeshBasicMaterial;
+  haloMat: THREE.MeshBasicMaterial;
 }
 
 interface Muzzle {
@@ -100,6 +121,8 @@ export class Renderer {
   private map: MapData;
   /** Static arena solids for the CURRENT map (rebuildable via setMap, MAP-04). */
   private arenaGroup: THREE.Group;
+  /** ART-05 sky dome (hidden temporarily by the FX-04 probe). */
+  private sky!: THREE.Mesh;
   private units: UnitVisual[] = [];
   private tracers: Tracer[] = [];
   private bulletTrails: BulletTrail[] = [];
@@ -107,6 +130,14 @@ export class Renderer {
   private sparks: Spark[] = [];
   private sparkGeo: THREE.BoxGeometry;
   private muzzleGeo: THREE.SphereGeometry;
+  /** FX-04: shared unit trail geometry — a cylinder of diameter 1 and
+   *  height 1 along +Y, capped. Each pooled slot scales it to
+   *  (width, length, width) and aligns its Y axis with the flight
+   *  direction; one geometry serves every tracer/trail (object pooling). */
+  private trailGeo: THREE.CylinderGeometry;
+  /** Scratch vectors for the quaternion alignment (no per-frame allocs). */
+  private tmpDir = new THREE.Vector3();
+  private tmpQuat = new THREE.Quaternion();
   private minimap: CanvasRenderingContext2D;
   private minimapSize: number;
   // ART-05: drifting cloud sprites (procedural canvas texture, no assets).
@@ -160,6 +191,12 @@ export class Renderer {
     this.minimapSize = minimapCanvas.width;
     this.sparkGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
     this.muzzleGeo = new THREE.SphereGeometry(0.1, 8, 8);
+    // 8 radial segments for a round silhouette; CLOSED ends are important:
+    // a bullet flying straight at the camera is seen dead-on, where an
+    // open-ended cylinder degenerates to zero area — the cap is what fills
+    // the (small, bright) disc in that view, and it doubles as the tracer
+    // head dot in oblique views.
+    this.trailGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 8, 1, false);
 
     this.buildLights();
     this.arenaGroup = new THREE.Group();
@@ -184,7 +221,7 @@ export class Renderer {
    *  textures/HDR (CSP + offline). Fog is disabled on the material so the
    *  horizon stays its full brightness no matter the camera distance. */
   private buildSky(): void {
-    const sky = new THREE.Mesh(
+    this.sky = new THREE.Mesh(
       new THREE.SphereGeometry(150, 32, 16),
       new THREE.ShaderMaterial({
         side: THREE.BackSide,
@@ -215,7 +252,7 @@ export class Renderer {
         `,
       })
     );
-    this.scene.add(sky);
+    this.scene.add(this.sky);
 
     // Two layers of soft, semi-transparent sprite clouds, seeded so the
     // layout is deterministic across reloads (E2E can rely on it).
@@ -566,16 +603,26 @@ export class Renderer {
     }
   }
 
+  /** FX-04: one pooled two-layer trail (bright core + wide faint halo),
+   *  sharing the unit cylinder geometry. Both meshes are hidden and fully
+   *  transparent until their slot is driven. */
+  private makeTrailPair(): { core: THREE.Mesh; halo: THREE.Mesh; coreMat: THREE.MeshBasicMaterial; haloMat: THREE.MeshBasicMaterial } {
+    const coreMat = new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+    const haloMat = new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+    const core = new THREE.Mesh(this.trailGeo, coreMat);
+    const halo = new THREE.Mesh(this.trailGeo, haloMat);
+    for (const m of [core, halo]) {
+      m.frustumCulled = false;
+      m.visible = false;
+      this.scene.add(m);
+    }
+    return { core, halo, coreMat, haloMat };
+  }
+
   private buildTracerPool(n: number): void {
     for (let i = 0; i < n; i++) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-      const mat = new THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending });
-      const line = new THREE.Line(geo, mat);
-      line.frustumCulled = false;
-      line.visible = false;
-      this.scene.add(line);
-      this.tracers.push({ line, mat, life: 0, max: CONFIG.tracerLife });
+      const pair = this.makeTrailPair();
+      this.tracers.push({ ...pair, life: 0, max: CONFIG.tracerLife });
     }
   }
 
@@ -586,14 +633,7 @@ export class Renderer {
    *  player can see a bullet coming AT them from a specific direction. */
   private buildBulletTrailPool(n: number): void {
     for (let i = 0; i < n; i++) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-      const mat = new THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending });
-      const line = new THREE.Line(geo, mat);
-      line.frustumCulled = false;
-      line.visible = false;
-      this.scene.add(line);
-      this.bulletTrails.push({ line, mat });
+      this.bulletTrails.push(this.makeTrailPair());
     }
   }
 
@@ -622,15 +662,30 @@ export class Renderer {
   spawnTracer(from: THREE.Vector3, to: THREE.Vector3): void {
     if (this.reducedMotion) return;
     const t = this.tracers[this.tracerCursor++ % this.tracers.length];
-    const attr = t.line.geometry.getAttribute('position') as THREE.BufferAttribute;
-    attr.setXYZ(0, from.x, from.y, from.z);
-    attr.setXYZ(1, to.x, to.y, to.z);
-    attr.needsUpdate = true;
+    const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+    const len = Math.max(0.05, Math.sqrt(dx * dx + dy * dy + dz * dz));
+    this.tmpDir.set(dx / len, dy / len, dz / len);
+    this.tmpQuat.setFromUnitVectors(TRAIL_UP, this.tmpDir);
+    // Cylinder is centred: park it at the segment midpoint, scale to the
+    // segment length, and additively blend a bright core under a wide halo.
+    t.core.position.set(
+      from.x + this.tmpDir.x * len * 0.5,
+      from.y + this.tmpDir.y * len * 0.5,
+      from.z + this.tmpDir.z * len * 0.5,
+    );
+    t.halo.position.copy(t.core.position);
+    t.core.quaternion.copy(this.tmpQuat);
+    t.halo.quaternion.copy(this.tmpQuat);
+    const w = CONFIG.bulletTrailWidth;
+    t.core.scale.set(w, len, w);
+    t.halo.scale.set(w * TRAIL_HALO_MULT, len, w * TRAIL_HALO_MULT);
     // FX-01: 0.09s (~5 frames) sat at the edge of perception; CONFIG.tracerLife
     // (0.18s, ~11 frames) is the single source of truth.
     t.life = t.max = CONFIG.tracerLife;
-    t.mat.color.setHex(0xffe08a);
-    t.line.visible = true;
+    t.coreMat.color.setHex(0xffe08a);
+    t.haloMat.color.setHex(0xffe08a);
+    t.core.visible = true;
+    t.halo.visible = true;
   }
 
   private muzzleCursor = 0;
@@ -709,32 +764,21 @@ export class Renderer {
 
     // Bullet trails: one short streak per in-flight bullet, tracking its live
     // position each frame (the bullet itself is stepped by the Match).
-    const trailLen = CONFIG.bulletTrail;
-    for (let i = 0; i < this.bulletTrails.length; i++) {
-      const t = this.bulletTrails[i];
-      const b = match.bullets.bullets[i];
-      if (b && b.active) {
-        const attr = t.line.geometry.getAttribute('position') as THREE.BufferAttribute;
-        attr.setXYZ(0, b.pos.x - b.dir.x * trailLen, b.pos.y - b.dir.y * trailLen, b.pos.z - b.dir.z * trailLen);
-        attr.setXYZ(1, b.pos.x, b.pos.y, b.pos.z);
-        attr.needsUpdate = true;
-        t.mat.opacity = 0.9;
-        t.line.visible = true;
-      } else {
-        t.mat.opacity = 0;
-        t.line.visible = false;
-      }
-    }
+    this.syncBulletTrails(match);
 
     // Tracers
     for (const t of this.tracers) {
       if (t.life <= 0) continue;
       t.life -= dt;
       if (t.life <= 0) {
-        t.line.visible = false;
-        t.mat.opacity = 0;
+        t.core.visible = false;
+        t.halo.visible = false;
+        t.coreMat.opacity = 0;
+        t.haloMat.opacity = 0;
       } else {
-        t.mat.opacity = t.life / t.max;
+        const k = t.life / t.max;
+        t.coreMat.opacity = TRAIL_CORE_OPACITY * k;
+        t.haloMat.opacity = TRAIL_HALO_OPACITY * k;
       }
     }
     // Muzzle flashes: expand + fade over their short life.
@@ -983,6 +1027,87 @@ export class Renderer {
         ctx.stroke();
       }
     }
+  }
+
+  /** Re-position every pooled bullet trail from the live bullet pool. Called
+   *  each frame from update() and by the FX-04 probe hook. */
+  private syncBulletTrails(match: Match): void {
+    const trailLen = CONFIG.bulletTrail;
+    const wCore = CONFIG.bulletTrailWidth;
+    const wHalo = wCore * TRAIL_HALO_MULT;
+    for (let i = 0; i < this.bulletTrails.length; i++) {
+      const t = this.bulletTrails[i];
+      const b = match.bullets.bullets[i];
+      if (b && b.active) {
+        this.tmpDir.set(b.dir.x, b.dir.y, b.dir.z);
+        if (this.tmpDir.lengthSq() < 1e-8) this.tmpDir.set(0, 1, 0);
+        else this.tmpDir.normalize();
+        this.tmpQuat.setFromUnitVectors(TRAIL_UP, this.tmpDir);
+        // Centred cylinder spanning [pos - dir*len, pos] (streak BEHIND the
+        // flying bullet).
+        t.core.position.set(
+          b.pos.x - this.tmpDir.x * trailLen * 0.5,
+          b.pos.y - this.tmpDir.y * trailLen * 0.5,
+          b.pos.z - this.tmpDir.z * trailLen * 0.5,
+        );
+        t.halo.position.copy(t.core.position);
+        t.core.quaternion.copy(this.tmpQuat);
+        t.halo.quaternion.copy(this.tmpQuat);
+        t.core.scale.set(wCore, trailLen, wCore);
+        t.halo.scale.set(wHalo, trailLen, wHalo);
+        t.coreMat.opacity = TRAIL_CORE_OPACITY;
+        t.haloMat.opacity = TRAIL_HALO_OPACITY;
+        t.core.visible = true;
+        t.halo.visible = true;
+      } else {
+        t.coreMat.opacity = 0;
+        t.haloMat.opacity = 0;
+        t.core.visible = false;
+        t.halo.visible = false;
+      }
+    }
+  }
+
+  /** FX-04 E2E hook: re-sync the bullet-trail pool from the given Match,
+   *  render ONE frame with the camera parked at a fixed pose looking ~70° up,
+   *  with the sky dome, clouds and sky background temporarily hidden so the
+   *  backdrop is pure black and the ONLY lit thing in the frame is the trail.
+   *  Returns the count of bright warm-gold (0xffe08a family) pixels. Note
+   *  the ACES tonemap washes saturated additive gold toward pale yellow, so
+   *  "warm gold" is luma >= 120 with blue clearly below red/green — NOT a
+   *  strict r >> b gap (additive gold over the daylight sky would saturate
+   *  to white anyway, which is why the backdrop is black). The caller
+   *  spawns the probe bullet in the match's bullet pool around this call.
+   *  The camera is harmless to leave: the next update() re-derives it. */
+  probeTrailWarmGoldPixels(match: Match): number {
+    this.syncBulletTrails(match);
+    const bg = this.scene.background as THREE.Color;
+    this.scene.background = new THREE.Color(0x000000);
+    this.sky.visible = false;
+    this.cloudGroup.visible = false;
+    // 70° elevation, half-vfov 39° -> the whole frame is sky (no geometry).
+    this.camera.position.set(0, 4, 12);
+    this.camera.lookAt(0, 13.3969, 8.5798);
+    this.renderer.render(this.scene, this.camera);
+    const gl = this.renderer.domElement;
+    const c = document.createElement('canvas');
+    c.width = gl.width;
+    c.height = gl.height;
+    const ctx = c.getContext('2d')!;
+    ctx.drawImage(gl, 0, 0);
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      // Bright warm gold: ACES-compressed additive 0xffe08a lands near
+      // (235-255, 245-255, 180-225) — blue channel clearly below r and g.
+      if (luma >= 120 && Math.min(r, g) >= b + 15) n++;
+    }
+    this.scene.background = bg;
+    this.sky.visible = true;
+    this.cloudGroup.visible = true;
+    return n;
   }
 
   resize(): void {

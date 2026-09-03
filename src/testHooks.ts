@@ -46,6 +46,12 @@ export interface TeamArenaTestHooks {
    *  final grain+mottling texture, `mottle` is the mottling layer alone —
    *  the seam probe checks the repeat wrap on the mottling layer. */
   sandTextureCanvases: () => { base: HTMLCanvasElement; mottle: HTMLCanvasElement };
+  /** FX-04: with one in-flight bullet flying straight AT the probe camera
+   *  (~5.6 units away, 2.5 units off-axis so the trail is seen obliquely),
+   *  how many warm-gold (0xffe08a family) pixels does one rendered frame
+   *  contain? The bullet is removed again before returning, so the match
+   *  state is untouched. */
+  probeTrailWarmGold: () => number;
   forceSpectate: () => void;
   repaintHud: () => void;
 }
@@ -85,6 +91,27 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     bgmPlaying: () => app.audio.bgmPlaying,
     findCenterViewSpot: () => app.findCenterViewSpot(),
     sandTextureCanvases: () => app.renderer.getSandTextureCanvases(),
+    probeTrailWarmGold: () => {
+      // FX-04: one in-flight bullet ~5.6 units from the probe camera pose
+      // (camera at (0,4,12), view axis u = (0, 0.939693, -0.342020) = 70° up),
+      // 2.5 units off-axis and aimed straight AT the camera — its trail is
+      // therefore seen obliquely, like a bullet incoming from the side.
+      const bx = 2.5;
+      const by = 4 + 5 * 0.939693;
+      const bz = 12 - 5 * 0.34202;
+      const dx = -bx, dy = -5 * 0.939693, dz = 5 * 0.34202;
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      app.match.bullets.spawn({
+        shooterId: 0,
+        shotIndex: -1,
+        origin: { x: bx, y: by, z: bz },
+        dir: { x: dx / len, y: dy / len, z: dz / len },
+        maxDist: 20,
+      });
+      const n = app.renderer.probeTrailWarmGoldPixels(app.match);
+      app.match.bullets.clear();
+      return n;
+    },
     forceSpectate: () => app.forceSpectate(),
     repaintHud: () => app.repaintHud(),
   };
