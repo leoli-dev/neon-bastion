@@ -2091,3 +2091,141 @@ test('24: ART-12 spawn wall — daylight-toned, not the night-era near-black', a
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });
+
+// ---------------------------------------------------------------------------
+// ART-13: clouds you can actually see + a sky that doesn't band + a ground
+// that has detail at close range. Negative controls were measured against
+// the pre-ART-13 build in the SAME probes while validating this test:
+//   - look-up cloud-band fraction (L>170 and B-R<30): 0.0000 -> 0.118
+//   - ground-hugging patch luma std (120×30 px):       3.87   -> 7.03
+// and the ART-06 five metrics all stay in their original ranges.
+test('25: ART-13 cloud band is visible, sky keeps its balance, ground has close-range detail', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+
+  // --- 1) Cloud band: look up 69° (single dy turn from the spawn pose,
+  // positive dy = down, so a NEGATIVE turn looks up; clamped at 1.2 rad).
+  // The frame is sky + cloud band; a sky pixel is BLUE (B > R, typically
+  // B-R ≈ +35..45) while a cloud pixel is near-white (B-R ≈ 0). Fraction of
+  // bright near-neutral pixels = the cloud's on-screen presence. Pre-ART-13
+  // this measured 0.0000: the old 14 pale sprites never crossed L=170.
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.seed(16);
+    t.teleport(0, 0, 20);
+    t.mouseTurn(0, -550); // pitch +1.2 rad: straight up-ish, cloud band centred
+  });
+  await page.waitForTimeout(300);
+
+  const cloudProbe = () =>
+    page.evaluate(() => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0, 320, 180);
+      const d = ctx.getImageData(0, 0, 320, 180).data;
+      const n = d.length / 4;
+      let cc = 0;
+      let sumL = 0;
+      let sumR = 0;
+      let sumB = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const r = d[i];
+        const g = d[i + 1];
+        const b = d[i + 2];
+        const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        sumL += l;
+        sumR += r;
+        sumB += b;
+        if (l > 170 && b - r < 30) cc++;
+      }
+      return {
+        cloudFrac: cc / n,
+        meanLuma: sumL / n,
+        warmCast: (sumR - sumB) / n,
+      };
+    });
+
+  let cloudMin = Infinity;
+  let warmMax = -Infinity;
+  let lumaMax = -Infinity;
+  for (let i = 0; i < 5; i++) {
+    const p = await cloudProbe();
+    cloudMin = Math.min(cloudMin, p.cloudFrac);
+    warmMax = Math.max(warmMax, p.warmCast);
+    lumaMax = Math.max(lumaMax, p.meanLuma);
+    await page.waitForTimeout(150);
+  }
+  console.log('ART-13 CLOUD BAND', cloudMin.toFixed(4), 'warm', warmMax.toFixed(1), 'luma', lumaMax.toFixed(1));
+
+  expect(
+    cloudMin,
+    `look-up cloud-band fraction (L>170 and B-R<30) must be ≥ 0.05 (pre-ART-13 measured 0.0000) — got ${cloudMin.toFixed(4)}`
+  ).toBeGreaterThanOrEqual(0.05);
+  // The warm horizon transition + dither must not blow out the sky: the
+  // look-up frame's red-minus-blue channel mean stays in the same range the
+  // ART-06 over-warm guard protects (≤ 40), and its mean luma must not
+  // saturate past the pre-ART-13 read (the frame was ~131 there).
+  expect(
+    warmMax,
+    `look-up frame mean(R)-mean(B) must be ≤ 40 (ART-06 over-warm guard) — got ${warmMax.toFixed(1)}`
+  ).toBeLessThanOrEqual(40);
+  expect(
+    lumaMax,
+    `look-up frame meanLuma must be ≤ 170 (the sky must not blow out) — got ${lumaMax.toFixed(1)}`
+  ).toBeLessThanOrEqual(170);
+
+  // --- 2) Ground close range: pitch down 38° (dy 300, single turn). The
+  // band x 100..220, y 100..130 at 320×180 is pure sand at ~2.5–5 m — a
+  // region where the pre-ART-13 texture was a single ±10 per-pixel grain
+  // level, so the luma std was 3.87 (the checkerboard control confirms the
+  // probe sees texture contrast: it jumps to ~85). With the mid-scale
+  // noise + wind-erosion ripples it reads 7.03. Sample the MIN over frames
+  // (a stale frame can only inflate… and the texture is static, so all
+  // frames agree — the min is the robust reading).
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.seed(16);
+    t.teleport(0, 0, 20);
+    // applyLook CUMULATES pitch, so this continues from the look-up pose
+    // (-550): net dy 300 = pitch -0.66 rad, ground fills the lower frame.
+    t.mouseTurn(0, 850);
+  });
+  await page.waitForTimeout(600);
+
+  let groundMin = Infinity;
+  for (let i = 0; i < 5; i++) {
+    const std = await page.evaluate(() => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0, 320, 180);
+      const d = ctx.getImageData(100, 100, 120, 30).data;
+      const n = d.length / 4;
+      let s = 0;
+      let ss = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const l = 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+        s += l;
+        ss += l * l;
+      }
+      const m = s / n;
+      return Math.sqrt(ss / n - m * m);
+    });
+    groundMin = Math.min(groundMin, std);
+    await page.waitForTimeout(150);
+  }
+  console.log('ART-13 GROUND PATCH STD', groundMin.toFixed(2));
+  expect(
+    groundMin,
+    `ground-hugging patch luma std must be ≥ 5.5 (pre-ART-13 measured 3.87) — got ${groundMin.toFixed(2)}`
+  ).toBeGreaterThanOrEqual(5.5);
+
+  await page.screenshot({ path: 'screenshots/25-art13-clouds-ground.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});

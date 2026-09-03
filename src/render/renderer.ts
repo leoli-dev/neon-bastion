@@ -351,9 +351,13 @@ export class Renderer {
 
   // ------------------------------------------------------------------ sky
   /** ART-05: a large BackSide sphere with a hand-rolled gradient shader
-   *  (deep zenith blue -> pale horizon blue). Fully procedural — no external
-   *  textures/HDR (CSP + offline). Fog is disabled on the material so the
-   *  horizon stays its full brightness no matter the camera distance. */
+   *  (deep zenith blue -> pale horizon blue). ART-13 refined the fill:
+   *  a warm transition band sits just above the horizon (real atmospheres
+   *  scatter warmer low in the dome) and a per-pixel hash dither (±~1.5
+   *  luma) breaks up the large pure-gradient areas that band on 8-bit
+   *  outputs. Fully procedural — no external textures/HDR (CSP + offline).
+   *  Fog is disabled on the material so the horizon stays its full
+   *  brightness no matter the camera distance. */
   private buildSky(): void {
     this.sky = new THREE.Mesh(
       new THREE.SphereGeometry(150, 32, 16),
@@ -379,7 +383,13 @@ export class Renderer {
           void main() {
             float h = clamp(normalize(vDir).y, 0.0, 1.0);
             float t = pow(h, 0.55);
-            gl_FragColor = vec4(mix(bottomColor, topColor, t), 1.0);
+            vec3 col = mix(bottomColor, topColor, t);
+            // ART-13: warm atmospheric band low on the dome (h < ~0.22).
+            col = mix(col, vec3(0.93, 0.86, 0.72), smoothstep(0.22, 0.0, h) * 0.30);
+            // ART-13: per-pixel hash dither kills 8-bit gradient banding.
+            float n = fract(sin(dot(normalize(vDir).xzy, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+            col += (n - 0.5) * 0.012;
+            gl_FragColor = vec4(col, 1.0);
             #include <tonemapping_fragment>
             #include <colorspace_fragment>
           }
@@ -390,9 +400,14 @@ export class Renderer {
 
     // Two layers of soft, semi-transparent sprite clouds, seeded so the
     // layout is deterministic across reloads (E2E can rely on it).
+    // ART-13: the band is now a proper cloud layer, not a few pale smudges —
+    // 28 two-layer clouds (a broad soft back layer under a dense front
+    // puff), brighter opacities, larger scales, each textured with shaded
+    // undersides + bright sunlit tops so they read as volume. Same slow
+    // 0.2-0.45 m/s drift, static under reduced motion (ART-05 unchanged).
     const texA = this.makeCloudTexture(0x1234abcd);
     const texB = this.makeCloudTexture(0x98765432);
-    const COUNT = 14;
+    const COUNT = 28;
     for (let i = 0; i < COUNT; i++) {
       const t = i / COUNT;
       const h1 = ((i + 1) * 0.61803398875) % 1; // golden-ratio hash per index
@@ -401,25 +416,42 @@ export class Renderer {
       const ang = t * Math.PI * 2 + h1 * 0.9;
       const rad = 30 + h2 * 32; // 30..62 m out from arena centre
       const y = 34 + h3 * 20; // 34..54 m up: a band above the wall tops
-      const mat = new THREE.SpriteMaterial({
+      const w = 20 + h2 * 14; // ART-13: larger, overlapping coverage
+      const x = Math.sin(ang) * rad;
+      const z = Math.cos(ang) * rad * 0.7;
+      // Back layer: broader, paler, slightly below the puffs — the cloud's
+      // diffuse under-structure. Added FIRST so the dense front puff draws
+      // over it; it registers in `clouds` on its own so both layers drift.
+      const back = new THREE.Sprite(new THREE.SpriteMaterial({
         map: i % 2 === 0 ? texA : texB,
         transparent: true,
-        opacity: 0.30 + h1 * 0.22,
+        opacity: 0.30,
         depthWrite: false,
-      });
-      const sprite = new THREE.Sprite(mat);
-      sprite.position.set(Math.sin(ang) * rad, y, Math.cos(ang) * rad * 0.7);
-      const w = 16 + h2 * 14;
+      }));
+      back.position.set(x, y - w * 0.06, z);
+      back.scale.set(w * 1.35, w * 1.35 * 0.42, 1);
+      this.cloudGroup.add(back);
+      this.clouds.push({ sprite: back, speed: 0.2 + h3 * 0.25 });
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: i % 2 === 0 ? texA : texB,
+        transparent: true,
+        opacity: 0.52 + h1 * 0.26, // ART-13: bright enough to read as cloud
+        depthWrite: false,
+      }));
+      sprite.position.set(x, y, z);
       sprite.scale.set(w, w * 0.42, 1);
       this.cloudGroup.add(sprite);
-      // "noticeable only if you watch": ~0.2-0.45 m/s drift.
       this.clouds.push({ sprite, speed: 0.2 + h3 * 0.25 });
     }
     this.scene.add(this.cloudGroup);
   }
 
-  /** One fluff of overlapping soft radial gradients on a 2D canvas — the
-   *  whole cloud texture budget of this build (no image assets, offline). */
+  /** ART-05/ART-13: one cumulus on a 2D canvas — the whole cloud texture
+   *  budget of this build (no image assets, offline). ART-13 made it read
+   *  as a CLOUD instead of a pale blob: a wide low puff field with a dense
+   *  core (multi-scale puff radii, so the edges are ragged instead of
+   *  elliptical), each puff carrying a cool shadow skirt on its underside
+   *  and a bright sunlit top — light/dark faces, not uniform white. */
   private makeCloudTexture(seed: number): THREE.CanvasTexture {
     const S = 256;
     const cv = document.createElement('canvas');
@@ -431,18 +463,47 @@ export class Renderer {
       s = (s * 48271) % 2147483647; // Park-Minimal LCG: stable per seed
       return s / 2147483647;
     };
-    for (let i = 0; i < 24; i++) {
-      const x = S * (0.18 + 0.64 * rnd());
-      const y = S * (0.38 + 0.24 * rnd());
-      const r = S * (0.07 + 0.15 * rnd());
+    const puff = (x: number, y: number, r: number, body: number, top: number): void => {
+      // Cool shaded skirt just below the puff centre (the cloud's dark side;
+      // the sun is high and to the north-west, so light hits the tops).
+      const sh = ctx.createRadialGradient(x, y + r * 0.45, 0, x, y + r * 0.45, r * 1.15);
+      sh.addColorStop(0, `rgba(138,158,190,${0.30 * body})`);
+      sh.addColorStop(1, 'rgba(138,158,190,0)');
+      ctx.fillStyle = sh;
+      ctx.beginPath();
+      ctx.arc(x, y + r * 0.45, r * 1.15, 0, Math.PI * 2);
+      ctx.fill();
+      // White body, soft-edged.
       const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, 'rgba(255,255,255,0.5)');
-      g.addColorStop(0.55, 'rgba(255,255,255,0.20)');
+      g.addColorStop(0, `rgba(255,255,255,${body})`);
+      g.addColorStop(0.62, `rgba(255,255,255,${0.55 * body})`);
       g.addColorStop(1, 'rgba(255,255,255,0)');
       ctx.fillStyle = g;
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.fill();
+      // Hot white top: the sunlit crown.
+      const tp = ctx.createRadialGradient(x - r * 0.12, y - r * 0.28, 0, x - r * 0.12, y - r * 0.28, r * 0.62);
+      tp.addColorStop(0, `rgba(255,255,255,${top})`);
+      tp.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = tp;
+      ctx.beginPath();
+      ctx.arc(x - r * 0.12, y - r * 0.28, r * 0.62, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    // Wide low field (the flat bottom edge of a cumulus), then a dense core
+    // sitting on top of it — small edge puffs, big core puffs.
+    for (let i = 0; i < 30; i++) {
+      const x = S * (0.10 + 0.80 * rnd());
+      const y = S * (0.44 + 0.20 * rnd());
+      const r = S * (0.05 + 0.07 * rnd());
+      puff(x, y, r, 0.65, 0.45);
+    }
+    for (let i = 0; i < 16; i++) {
+      const x = S * (0.24 + 0.52 * rnd());
+      const y = S * (0.30 + 0.20 * rnd());
+      const r = S * (0.10 + 0.11 * rnd());
+      puff(x, y, r, 0.9, 0.8);
     }
     return new THREE.CanvasTexture(cv);
   }
@@ -616,13 +677,28 @@ export class Renderer {
     this.buildArenaSolids(map);
   }
 
-  /** ART-06: procedural sand grain — a deterministic (seeded LCG, stable
+    /** ART-06: procedural sand grain — a deterministic (seeded LCG, stable
    *  across reloads) per-pixel lightness jitter over the base sand colour,
    *  plus a scattering of soft dark/light patches so the floor has visible
    *  texture and no large dead-flat region. Repeats across the 120 m plane.
    *  The mottling is painted on its OWN transparent layer (kept for the
    *  ART-07 seam probe) and composited over the grain — the final texture is
-   *  pixel-identical to painting both on one canvas. */
+   *  pixel-identical to painting both on one canvas.
+   *  ART-13 added the detail levels the ground-level view was missing:
+   *  (a) a mid-scale 32×32-cell bilinear noise field (±14 luma) for patchy
+   *  tonal variation between grains, and (b) wind-erosion ripple bands —
+   *  3 wide sinusoidal crest/shadow stripes per tile whose phase wiggles
+   *  with a second sine, the classic dune-ripple look. (a) and (b) are
+   *  built from integer frequencies ONLY (32 cells / 3 bands / wiggle
+   *  wavelength 2 across the tile), i.e. exactly periodic across the 256 px
+   *  tile, so the repeat stays seam-free the same way the grain always did —
+   *  nothing crosses an edge that isn't continued (the mottle layer is still
+   *  what carries the ART-07 wrap-repaint + seam probe). The repeat is
+   *  coarser now (10×, 12 m tiles, was 14×) so ripples/mottling sit at world
+   *  scales the ground-level view resolves, with anisotropic filtering so
+   *  the steep oblique angles keep the detail instead of mip-smearing the
+   *  sand to a flat tone. Fine grain stays ±10 per pixel: close it reads as
+   *  grit, far it blends away in the mips. */
   private makeSandTexture(): THREE.CanvasTexture {
     const S = 256;
     let s = 0x5a7d0d5a >>> 0; // fixed seed: deterministic texture
@@ -630,34 +706,61 @@ export class Renderer {
       s = (s * 48271) % 2147483647; // Park-Minimal LCG: stable per seed
       return s / 2147483647;
     };
-    // Base sand 0xd9c08a with ±10 per-pixel lightness jitter (the grain).
+    // ART-13 mid-scale noise: 32×32 cell values, wrapped at the edges so the
+    // bilinear sample is periodic in both axes (cell k and k+32 match).
+    const M = 32;
+    const cells = new Float32Array(M * M);
+    for (let i = 0; i < cells.length; i++) cells[i] = (rnd() - 0.5) * 2;
+    const mid = (u: number, v: number): number => {
+      const fx = u * M, fy = v * M;
+      const x0 = Math.floor(fx) % M, y0 = Math.floor(fy) % M;
+      const x1 = (x0 + 1) % M, y1 = (y0 + 1) % M;
+      const tx = fx - Math.floor(fx), ty = fy - Math.floor(fy);
+      const a = cells[y0 * M + x0] * (1 - tx) + cells[y0 * M + x1] * tx;
+      const b = cells[y1 * M + x0] * (1 - tx) + cells[y1 * M + x1] * tx;
+      return a * (1 - ty) + b * ty;
+    };
+    const TAU = Math.PI * 2;
+    // Base sand 0xd9c08a with per-pixel ±10 grain (fine) + ±14 mid-scale
+    // noise (patchy tone between grains) + ±15 wind-erosion ripples
+    // (crest/shadow bands, slightly desaturated on the crests).
     const grain = document.createElement('canvas');
     grain.width = grain.height = S;
     const gctx = grain.getContext('2d')!;
     const img = gctx.createImageData(S, S);
     const [br, bg, bb] = [217, 192, 138];
-    for (let i = 0; i < img.data.length; i += 4) {
-      const j = (rnd() - 0.5) * 20;
-      img.data[i] = br + j;
-      img.data[i + 1] = bg + j * 0.9;
-      img.data[i + 2] = bb + j * 0.8;
-      img.data[i + 3] = 255;
+    for (let py = 0; py < S; py++) {
+      for (let px = 0; px < S; px++) {
+        const u = px / S, v = py / S;
+        const j = (rnd() - 0.5) * 20;
+        const m = mid(u, v) * 14;
+        // 3 wide ripple bands across the tile; the phase wiggles over a
+        // 2-cell wavelength — all integer frequencies, so the tile is exact.
+        const rph = TAU * (3 * v + 0.15 * Math.sin(TAU * 2 * u));
+        const rip = (0.5 + 0.5 * Math.sin(rph)) * 30 - 15;
+        const ripT = Math.max(0, rip) / 15; // 0..1 crest factor
+        const i4 = (py * S + px) * 4;
+        img.data[i4] = br + j + m + rip;
+        img.data[i4 + 1] = bg + (j + m + rip) * 0.9 - ripT * 2;
+        img.data[i4 + 2] = bb + (j + m + rip) * 0.8 - ripT * 4;
+        img.data[i4 + 3] = 255;
+      }
     }
     gctx.putImageData(img, 0, 0);
     // Soft mottling: a handful of translucent light/dark patches on top.
     // ART-07: each patch is ALSO repainted at the 8 neighbouring tile
     // offsets, so a patch crossing a tile edge continues on the opposite
-    // side and the 14×14-repeat ground has no right-angle seam where a
+    // side and the repeated ground has no right-angle seam where a
     // radial falloff used to be hard-clipped at the tile boundary.
     const mottle = document.createElement('canvas');
     mottle.width = mottle.height = S;
     const mctx = mottle.getContext('2d')!;
-    for (let i = 0; i < 36; i++) {
+    for (let i = 0; i < 44; i++) {
       const x = S * rnd();
       const y = S * rnd();
       const r = S * (0.05 + 0.16 * rnd());
       const dark = rnd() < 0.5;
-      const a = 0.05 + rnd() * 0.09;
+      const a = 0.05 + rnd() * 0.13; // ART-13: slightly bolder patches
       for (let ox = -1; ox <= 1; ox++) {
         for (let oy = -1; oy <= 1; oy++) {
           const px = x + ox * S;
@@ -684,7 +787,11 @@ export class Renderer {
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(14, 14);
+    // ART-13: coarser repeat (12 m tiles) so the ripples/mottling sit at
+    // world scales the ground-level view resolves, plus anisotropy so the
+    // steep oblique ground angles keep detail instead of smearing flat.
+    tex.repeat.set(10, 10);
+    tex.anisotropy = 8;
     return tex;
   }
 
