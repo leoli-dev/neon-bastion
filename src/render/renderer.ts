@@ -29,7 +29,10 @@ const RED = { body: 0xff3d63, head: 0xffc9d4, emissive: 0x8a1530, ring: 0xff3d63
 // than the one before it, so cover (the thing you judge in a split second) is
 // the brightest architecture and the boundary recedes into the background.
 const ENV = {
-  background: 0x05070b,
+  // ART-05: procedural sky palette. The horizon colour doubles as the fog
+  // colour so far geometry fades into the sky instead of a black void.
+  skyZenith: 0x1c4f9e,
+  skyHorizon: 0xbcd9f2,
   ground: 0x0a0d13,
   boundary: 0x0e1013,
   // ART-03: raised from 0x1a1d22 (~11% lightness, unreadable in real play).
@@ -96,6 +99,9 @@ export class Renderer {
   private muzzleGeo: THREE.SphereGeometry;
   private minimap: CanvasRenderingContext2D;
   private minimapSize: number;
+  // ART-05: drifting cloud sprites (procedural canvas texture, no assets).
+  private cloudGroup = new THREE.Group();
+  private clouds: Array<{ sprite: THREE.Sprite; speed: number }> = [];
   /** UX-12: last time/spot each enemy unit was inside the player team's
    *  shared view — drives the short fade-out at the last known position. */
   private enemyLastSeen = new Map<number, { x: number; z: number; at: number }>();
@@ -124,10 +130,17 @@ export class Renderer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(ENV.background);
+    // ART-05: the flat near-black background is replaced by a procedural sky
+    // dome (zenith deep blue -> horizon pale blue). The scene background is
+    // kept at the HORIZON colour as a seam-free fallback, and the fog colour
+    // is pinned to it too — otherwise far walls fade to black and the arena
+    // looks sliced off from the blue sky. (Deliberately NOT touching ground,
+    // materials, exposure or lights: that is task 8.)
+    this.scene.background = new THREE.Color(ENV.skyHorizon);
     // The arena is only ~64 units wide; fogging at 22m smeared the whole
     // firefight. Push it back so depth is a subtle cue, not a blur.
-    this.scene.fog = new THREE.Fog(ENV.background, 38, 95);
+    this.scene.fog = new THREE.Fog(ENV.skyHorizon, 38, 95);
+    this.buildSky();
 
     this.camera = new THREE.PerspectiveCamera(CONFIG.fovBase, 16 / 9, 0.1, 300);
     this.camera.position.set(0, 1.6, 27);
@@ -148,9 +161,126 @@ export class Renderer {
     this.resize();
   }
 
-  /** Honours prefers-reduced-motion: no tracers, fewer sparks, static cameras. */
+  /** Honours prefers-reduced-motion: no tracers, fewer sparks, static cameras,
+   *  and static clouds (ART-05 keeps the clouds on screen, only stops them). */
   setReducedMotion(on: boolean): void {
     this.reducedMotion = on;
+  }
+
+  // ------------------------------------------------------------------ sky
+  /** ART-05: a large BackSide sphere with a hand-rolled gradient shader
+   *  (deep zenith blue -> pale horizon blue). Fully procedural — no external
+   *  textures/HDR (CSP + offline). Fog is disabled on the material so the
+   *  horizon stays its full brightness no matter the camera distance. */
+  private buildSky(): void {
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(150, 32, 16),
+      new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        fog: false,
+        depthWrite: false,
+        uniforms: {
+          topColor: { value: new THREE.Color(ENV.skyZenith) },
+          bottomColor: { value: new THREE.Color(ENV.skyHorizon) },
+        },
+        vertexShader: `
+          varying vec3 vDir;
+          void main() {
+            vDir = position;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 topColor;
+          uniform vec3 bottomColor;
+          varying vec3 vDir;
+          void main() {
+            float h = clamp(normalize(vDir).y, 0.0, 1.0);
+            float t = pow(h, 0.55);
+            gl_FragColor = vec4(mix(bottomColor, topColor, t), 1.0);
+            #include <tonemapping_fragment>
+            #include <colorspace_fragment>
+          }
+        `,
+      })
+    );
+    this.scene.add(sky);
+
+    // Two layers of soft, semi-transparent sprite clouds, seeded so the
+    // layout is deterministic across reloads (E2E can rely on it).
+    const texA = this.makeCloudTexture(0x1234abcd);
+    const texB = this.makeCloudTexture(0x98765432);
+    const COUNT = 14;
+    for (let i = 0; i < COUNT; i++) {
+      const t = i / COUNT;
+      const h1 = ((i + 1) * 0.61803398875) % 1; // golden-ratio hash per index
+      const h2 = ((i + 1) * 0.37709178234) % 1;
+      const h3 = ((i + 1) * 0.53073372275) % 1;
+      const ang = t * Math.PI * 2 + h1 * 0.9;
+      const rad = 30 + h2 * 32; // 30..62 m out from arena centre
+      const y = 34 + h3 * 20; // 34..54 m up: a band above the wall tops
+      const mat = new THREE.SpriteMaterial({
+        map: i % 2 === 0 ? texA : texB,
+        transparent: true,
+        opacity: 0.30 + h1 * 0.22,
+        depthWrite: false,
+      });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.set(Math.sin(ang) * rad, y, Math.cos(ang) * rad * 0.7);
+      const w = 16 + h2 * 14;
+      sprite.scale.set(w, w * 0.42, 1);
+      this.cloudGroup.add(sprite);
+      // "noticeable only if you watch": ~0.2-0.45 m/s drift.
+      this.clouds.push({ sprite, speed: 0.2 + h3 * 0.25 });
+    }
+    this.scene.add(this.cloudGroup);
+  }
+
+  /** One fluff of overlapping soft radial gradients on a 2D canvas — the
+   *  whole cloud texture budget of this build (no image assets, offline). */
+  private makeCloudTexture(seed: number): THREE.CanvasTexture {
+    const S = 256;
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = S;
+    const ctx = cv.getContext('2d')!;
+    ctx.clearRect(0, 0, S, S);
+    let s = seed >>> 0 || 1;
+    const rnd = (): number => {
+      s = (s * 48271) % 2147483647; // Park-Minimal LCG: stable per seed
+      return s / 2147483647;
+    };
+    for (let i = 0; i < 24; i++) {
+      const x = S * (0.18 + 0.64 * rnd());
+      const y = S * (0.38 + 0.24 * rnd());
+      const r = S * (0.07 + 0.15 * rnd());
+      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, 'rgba(255,255,255,0.5)');
+      g.addColorStop(0.55, 'rgba(255,255,255,0.20)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    return new THREE.CanvasTexture(cv);
+  }
+
+  /** Advance the cloud drift by dt real seconds. No-op under reduced motion
+   *  (the clouds stay on screen, only the animation stops). */
+  private updateClouds(dt: number): void {
+    if (this.reducedMotion) return;
+    for (const c of this.clouds) {
+      c.sprite.position.x += c.speed * dt;
+      if (c.sprite.position.x > 90) c.sprite.position.x -= 180; // wrap the band
+    }
+  }
+
+  /** ART-05 E2E hook: deterministically advance the sky (cloud drift) by
+   *  `seconds` and repaint once, so a pixel diff between two calls measures
+   *  the drift alone — independent of the (throttled) headless rAF cadence. */
+  stepSky(seconds: number): void {
+    this.updateClouds(seconds);
+    this.renderer.render(this.scene, this.camera);
   }
 
   /** Firing recoil: each shot adds `amount` of pitch-up. The charge persists
@@ -557,6 +687,9 @@ export class Renderer {
         s.mat.opacity = s.life / s.max;
       }
     }
+
+    // ART-05: drift the clouds (no-op under reduced motion).
+    this.updateClouds(dt);
 
     this.drawMinimap(match);
     this.renderer.render(this.scene, this.camera);

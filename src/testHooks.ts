@@ -26,6 +26,10 @@ export interface TeamArenaTestHooks {
    *  pitch offset currently applied to the view; `recoilCharge` is the
    *  synchronous per-shot accumulation (set the moment a shot fires). */
   cameraKicks: () => { kickYaw: number; kickPitch: number; recoil: number; recoilCharge: number };
+  /** ART-05: advance the sky's cloud drift by `seconds` real seconds and
+   *  repaint once (no-op drift under reduced motion). Lets E2E measure cloud
+   *  motion deterministically despite throttled headless rAF. */
+  fastForwardSky: (seconds: number) => void;
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   forceSpectate: () => void;
@@ -59,6 +63,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
       app.match.onEvent?.({ type: 'hit', victimId: 0, part });
     },
     cameraKicks: () => app.renderer.getCameraKicks(),
+    fastForwardSky: (seconds) => app.renderer.stepSky(seconds),
     teleport: (unitId, x, z) => app.teleport(unitId, x, z),
     fastForward: (seconds) => app.fastForward(seconds),
     forceSpectate: () => app.forceSpectate(),

@@ -75,11 +75,13 @@ type Hooks = {
   start: () => void;
   playAgain: () => void;
   restart: (s?: number) => void;
+  mouseTurn: (dx: number, dy: number) => void;
   input: (key: string, down: boolean) => void;
   shoot: (dir?: { x: number; y: number; z: number }) => unknown;
   applyDamage: (victimId: number, amount: number, causeId?: number) => void;
   simulateHitOnPlayer: (causeId: number, part?: 'head' | 'body') => void;
   cameraKicks: () => { kickYaw: number; kickPitch: number; recoil: number; recoilCharge: number };
+  fastForwardSky: (seconds: number) => void;
   teleport: (unitId: number, x: number, z: number) => void;
   fastForward: (seconds: number) => void;
   forceSpectate: () => void;
@@ -800,6 +802,180 @@ test('9: UX-12 minimap — enemy hidden behind the player, appears when in front
   expect(ahead.count, `enemy straight ahead MUST appear on the minimap (sample ${ahead.sample.join(',')})`).toBeGreaterThan(0);
 
   await page.screenshot({ path: 'screenshots/09-minimap-vision.png' });
+  const real = errors.filter((e) => !GL_NOISE.test(e));
+  expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
+});
+
+// ---------------------------------------------------------------------------
+interface SkySample {
+  meanR: number;
+  meanG: number;
+  meanB: number;
+  luma: number;
+}
+/** Mean channel values of a horizontal band of the WebGL canvas (defaults to
+ *  the UPPER band: with the camera pitched to the zenith this is pure sky).
+ *  With `store=true` also stashes the raw pixels on window for a later diff.
+ *  preserveDrawingBuffer:true makes the in-page drawImage read reliable. */
+async function sampleSkyBand(
+  page: Page,
+  y0: number,
+  y1: number,
+  store: boolean
+): Promise<SkySample> {
+  return page.evaluate(
+    ([y0, y1, store]) => {
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = gl.width;
+      c.height = gl.height;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0);
+      const xa = 0;
+      const ya = Math.floor(c.height * y0);
+      const w = c.width;
+      const h = Math.max(1, Math.ceil(c.height * y1) - ya);
+      const d = ctx.getImageData(xa, ya, w, h).data;
+      if (store) {
+        (window as unknown as Record<string, unknown>).__skyPrev = d;
+      }
+      let r = 0,
+        g = 0,
+        b = 0,
+        luma = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        r += d[i];
+        g += d[i + 1];
+        b += d[i + 2];
+        luma += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      }
+      const n = d.length / 4;
+      return { meanR: r / n, meanG: g / n, meanB: b / n, luma: luma / n };
+    },
+    [y0, y1, store] as [number, number, boolean]
+  );
+}
+
+/** Count pixels in the band (y0..y1) that differ from the previously stored
+ *  `__skyPrev` frame by more than `eps` per-channel sum. */
+async function diffAgainstStoredSky(
+  page: Page,
+  y0: number,
+  y1: number,
+  eps: number
+): Promise<number> {
+  return page.evaluate(
+    ([y0, y1, eps]) => {
+      const prev = (window as unknown as { __skyPrev?: Uint8ClampedArray }).__skyPrev!;
+      const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+      const c = document.createElement('canvas');
+      c.width = gl.width;
+      c.height = gl.height;
+      const ctx = c.getContext('2d')!;
+      ctx.drawImage(gl, 0, 0);
+      const ya = Math.floor(c.height * y0);
+      const w = c.width;
+      const h = Math.max(1, Math.ceil(c.height * y1) - ya);
+      const d = ctx.getImageData(0, ya, w, h).data;
+      let changed = 0;
+      const n = d.length / 4;
+      for (let i = 0; i < d.length; i += 4) {
+        const dr = Math.abs(d[i] - prev[i]);
+        const dg = Math.abs(d[i + 1] - prev[i + 1]);
+        const db = Math.abs(d[i + 2] - prev[i + 2]);
+        if (dr + dg + db > eps) changed++;
+      }
+      void n;
+      return changed;
+    },
+    [y0, y1, eps] as [number, number, number]
+  );
+}
+
+/** Point the player's camera ~50° up and let a rendered frame present.
+ *  Pre-start scene: the fixed-tick loop does not run, so the camera stays
+ *  exactly where we put it. At ~50° pitch the WHOLE frame is sky (FOV 78°:
+ *  top edge ≈ 89° elevation, bottom edge ≈ 13° — the zenith sits at the
+ *  screen centre), so the upper band is near-zenith sky and the lower band
+ *  sits close to the pale horizon. */
+async function lookAtSky(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const t = (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest;
+    t.teleport(0, 0, 20);
+    // pitch = clamp(pitch - dy * 0.0022, -1.35, 1.35): dy -409 -> pitch ≈ +0.9
+    // rad (~51.5°) above the horizon (a NEGATIVE dy pitches UP).
+    t.mouseTurn(0, -409);
+  });
+  await page.waitForTimeout(300); // let a few rendered frames present
+}
+
+test('10: ART-05 sky — blue gradient overhead, clouds drift, frozen under reduced motion', async ({ page }) => {
+  const errors = trackErrors(page);
+  await ready(page);
+  await pinSeed(page);
+  await lookAtSky(page);
+
+  // --- The upper half is SKY: blue channel mean well above red channel mean
+  // (the old flat 0x05070b background had R≈B≈8 and luma ≈ 8). The upper
+  // band (near zenith) is dominated by the deep blue. ---
+  const sky = await sampleSkyBand(page, 0.02, 0.48, false);
+  console.log('SKY UPPER BAND', JSON.stringify(sky));
+  expect(
+    sky.meanB - sky.meanR,
+    `looking up must be BLUE sky, not black/warm (R=${sky.meanR.toFixed(1)} B=${sky.meanB.toFixed(1)})`
+  ).toBeGreaterThan(20);
+  expect(
+    sky.luma,
+    `the upper band must be clearly brighter than the old near-black background (luma ~8) — got ${sky.luma.toFixed(1)}`
+  ).toBeGreaterThan(28);
+  // The gradient: the lower band (near the horizon at this pitch) reads
+  // brighter than the zenith band — deep-blue zenith -> pale horizon.
+  const horizonBand = await sampleSkyBand(page, 0.6, 0.92, false);
+  console.log('SKY HORIZON BAND', JSON.stringify(horizonBand));
+  expect(
+    horizonBand.luma - sky.luma,
+    `horizon must be paler/brighter than zenith (horizon ${horizonBand.luma.toFixed(1)} vs zenith ${sky.luma.toFixed(1)})`
+  ).toBeGreaterThan(5);
+
+  await page.screenshot({ path: 'screenshots/10-sky.png' });
+
+  // --- Drifting clouds: store the whole sky frame, advance the sky
+  // deterministically via the hook (independent of throttled headless rAF),
+  // then the same band must differ by a real number of pixels — the clouds
+  // moved. ---
+  await sampleSkyBand(page, 0.05, 0.9, true);
+  await page.evaluate(() => (
+    (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest.fastForwardSky(3.0)
+  ));
+  const drifted = await diffAgainstStoredSky(page, 0.05, 0.9, 12);
+  const totalPx = await page.evaluate(() => {
+    const gl = document.getElementById('webgl-canvas') as HTMLCanvasElement;
+    return Math.ceil(gl.height * 0.85) * gl.width;
+  });
+  console.log('SKY DRIFT', JSON.stringify({ drifted, totalPx }));
+  expect(
+    drifted,
+    `clouds must be drifting (only ${drifted} of ${totalPx} band pixels changed after 3s of sky time)`
+  ).toBeGreaterThan(totalPx * 0.005);
+
+  // --- Reduced motion: same setup, clouds stay ON SCREEN but do not move.
+  // A 3-second sky advance must change (essentially) no pixels. ---
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await ready(page);
+  await pinSeed(page);
+  await lookAtSky(page);
+  const rm = await sampleSkyBand(page, 0.05, 0.9, true);
+  expect(rm.meanB - rm.meanR, 'reduced-motion: the sky must still be blue').toBeGreaterThan(20);
+  await page.evaluate(() => (
+    (window as unknown as { __teamArenaTest: Hooks }).__teamArenaTest.fastForwardSky(3.0)
+  ));
+  const frozen = await diffAgainstStoredSky(page, 0.05, 0.9, 12);
+  console.log('SKY REDUCED MOTION', JSON.stringify({ frozen, totalPx }));
+  expect(
+    frozen,
+    `under prefers-reduced-motion the clouds must be static (${frozen} of ${totalPx} band pixels changed after 3s)`
+  ).toBeLessThan(totalPx * 0.001);
+
   const real = errors.filter((e) => !GL_NOISE.test(e));
   expect(real, 'no real JS errors: ' + real.join(' | ')).toHaveLength(0);
 });
