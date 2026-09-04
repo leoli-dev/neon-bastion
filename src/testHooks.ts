@@ -52,6 +52,8 @@ export interface TeamArenaTestHooks {
    *  sensitive layer alone — the seam probe checks its repeat wrap, the
    *  same probe shape as the ART-07 sand seam test. */
   hedgeTextureCanvases: () => { base: HTMLCanvasElement; foliage: HTMLCanvasElement };
+  /** ART-16: the glass pane tile canvas (seam / mullion probes). */
+  glassTextureCanvas: () => HTMLCanvasElement;
   /** ART-08: per-unit LOCAL-space bounding boxes of the visible humanoid
    *  parts (ground ring excluded — a floor marker, not the character; weapon
    *  also excluded — an explicit ART-10 exception: the held prop is NOT part
@@ -102,7 +104,7 @@ export interface TeamArenaTestHooks {
 }
 
 export function createTestHooks(app: App): TeamArenaTestHooks {
-  return {
+  const hooks: TeamArenaTestHooks = {
     version: '1.0.0',
     ready: true,
     state: () => app.match.snapshot(),
@@ -137,6 +139,7 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     findCenterViewSpot: () => app.findCenterViewSpot(),
     sandTextureCanvases: () => app.renderer.getSandTextureCanvases(),
     hedgeTextureCanvases: () => app.renderer.getHedgeTextureCanvases(),
+    glassTextureCanvas: () => app.renderer.getGlassTextureCanvas(),
     unitVisualBounds: () => app.renderer.unitVisualBounds(),
     weaponState: (unitId) => app.weaponProbe(unitId),
     viewModelVisible: (v) => app.renderer.setViewModelVisible(v),
@@ -169,4 +172,5 @@ export function createTestHooks(app: App): TeamArenaTestHooks {
     forceSpectate: () => app.forceSpectate(),
     repaintHud: () => app.repaintHud(),
   };
+  return hooks;
 }

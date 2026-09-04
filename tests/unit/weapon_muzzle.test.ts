@@ -39,6 +39,10 @@ describe('ART-10 weapon muzzle math', () => {
   it('un-recoiled barrel tip reproduces the legacy muzzle formula for any aim', () => {
     const pos = { x: 3.2, y: 0.4, z: -7.5 };
     const uYaw = 1.0;
+    // The LEGACY chest pivot: with it, the new signature must reproduce the
+    // old formula exactly (ART-15 kept the math, only the runtime pivot
+    // moved — now it follows the right hand).
+    const legacyPivot = { x: 0, y: WEAPON_PIVOT_Y, z: 0 };
     const dirs = [
       aim(uYaw, 0),        // straight ahead, no pitch
       aim(0.2, 0.3),       // other yaw, pitched up
@@ -47,7 +51,7 @@ describe('ART-10 weapon muzzle math', () => {
       aim(0, 0.7),         // steep elevation
     ];
     for (const a of dirs) {
-      const tip = weaponMuzzleWorld(pos, uYaw, a, 0);
+      const tip = weaponMuzzleWorld(pos, uYaw, legacyPivot, a, 0);
       const eyeY = pos.y + CONFIG.eyeHeight;
       expect(Math.abs(tip.x - (pos.x + a.x * MUZZLE_OFFSET))).toBeLessThan(EPS);
       expect(Math.abs(tip.y - (eyeY - MUZZLE_DROP + a.y * MUZZLE_OFFSET))).toBeLessThan(EPS);
@@ -58,8 +62,11 @@ describe('ART-10 weapon muzzle math', () => {
   it('recoil pulls the tip back and up, by a small bounded amount', () => {
     const pos = { x: 0, y: 0, z: 0 };
     const a = aim(0.4, 0.1);
-    const t0 = weaponMuzzleWorld(pos, 0.4, a, 0);
-    const t1 = weaponMuzzleWorld(pos, 0.4, a, 1);
+    const pivot = { x: 0, y: WEAPON_PIVOT_Y, z: 0 };
+    const t0 = weaponMuzzleWorld(pos, 0.4, pivot, a, 0);
+    // Full recoil: the pivot is pulled back along the unit's local -Z…
+    const recoilPivot = { x: 0, y: WEAPON_PIVOT_Y, z: -WEAPON_RECOIL_TRAVEL };
+    const t1 = weaponMuzzleWorld(pos, 0.4, recoilPivot, a, 1);
     // Bounded: a full recoil kick moves the muzzle less than ~0.1 m.
     expect(dist(t0, t1)).toBeLessThan(0.1);
     // Direction: net pulled BACK along the aim (the travel wins over the
@@ -67,6 +74,26 @@ describe('ART-10 weapon muzzle math', () => {
     const dx = t0.x - t1.x, dy = t0.y - t1.y, dz = t0.z - t1.z;
     expect(a.x * dx + a.y * dy + a.z * dz).toBeGreaterThan(WEAPON_RECOIL_TRAVEL * 0.5);
     expect(t1.y - t0.y).toBeGreaterThan(0);
+  });
+
+  it('an off-centre pivot shifts the tip rigidly (hand-follow coherence)', () => {
+    // ART-15: whatever local point the pivot sits at (the right hand), the
+    // tip must be pivotWorld + dir*MUZZLE_OFFSET — the same rigid rule the
+    // 3D mesh uses, so the flash can never drift from the barrel tip.
+    const pos = { x: 1, y: 0, z: 2 };
+    const uYaw = 0.9;
+    const pivotLocal = { x: -0.25, y: 0.98, z: 0.52 };
+    const a = aim(0.4, 0.1);
+    const tip = weaponMuzzleWorld(pos, uYaw, pivotLocal, a, 0);
+    const cp = Math.cos(-Math.asin(a.y));
+    const su = Math.sin(uYaw), cu = Math.cos(uYaw);
+    const px = pos.x + pivotLocal.x * cu + pivotLocal.z * su;
+    const py = pos.y + pivotLocal.y;
+    const pz = pos.z - pivotLocal.x * su + pivotLocal.z * cu;
+    const dx = Math.sin(0.4) * cp, dy = a.y, dz = Math.cos(0.4) * cp;
+    expect(Math.abs(tip.x - (px + dx * MUZZLE_OFFSET))).toBeLessThan(EPS);
+    expect(Math.abs(tip.y - (py + dy * MUZZLE_OFFSET))).toBeLessThan(EPS);
+    expect(Math.abs(tip.z - (pz + dz * MUZZLE_OFFSET))).toBeLessThan(EPS);
   });
 
   it('aim rotation: raised pose points at the aim, rest pose droops below it', () => {

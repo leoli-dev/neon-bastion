@@ -13,22 +13,28 @@
 //   WEAPON_PIVOT_Y + MUZZLE_DROP === CONFIG.eyeHeight (1.50 + 0.12 = 1.62),
 // and puts the barrel tip exactly MUZZLE_OFFSET ahead of that pivot along the
 // weapon's own +Z axis. Because the pivot sits on the muzzle line of the
-// formula, `weaponMuzzleWorld(pos, yaw, aim, 0)` reproduces the legacy
-// formula to machine precision for ANY aim direction (including steep
-// pitch) — the flash spawns at the actual barrel tip instead of a second,
-// independent calculation.
+// formula, `weaponMuzzleWorld(..., 0)` with the legacy chest pivot
+// ({x: 0, y: WEAPON_PIVOT_Y, z: 0}) reproduces the legacy formula to machine
+// precision for ANY aim direction (including steep pitch) — the flash spawns
+// at the actual barrel tip instead of a second, independent calculation.
+//
+// ART-15 (Task 11): the runtime pivot no longer sits at the chest — it
+// FOLLOWS the right hand (rightHandLocal / weaponPivotLocal, pure functions
+// of gait phase + aim blend), and weaponMuzzleWorld takes the pivot position
+// EXPLICITLY so the flash stays coherent with the moving hand.
 
 import * as THREE from 'three';
 import type { Vec3 } from '../game/types';
+import { WALK } from './walkAnim';
 
 /** Metres along the shot direction from the shooter's eye to the muzzle.
  *  Shared FX offset (previously a private app.ts constant). */
 export const MUZZLE_OFFSET = 0.55;
 /** Metres the muzzle sits below eye level in the muzzle-flash formula. */
 export const MUZZLE_DROP = 0.12;
-/** Weapon pivot height above the feet: CONFIG.eyeHeight (1.62) - MUZZLE_DROP
- *  (0.12) = 1.50. Chest level — the gun reads as "held across the chest",
- *  raised to eye level when aiming. */
+/** LEGACY chest anchor, height above the feet: CONFIG.eyeHeight (1.62) -
+ *  MUZZLE_DROP (0.12) = 1.50. Kept for the muzzle-formula identity tests;
+ *  the runtime pivot follows the right hand instead (see ART-15 below). */
 export const WEAPON_PIVOT_Y = 1.5;
 /** Relaxed (not firing) pose: muzzle droops ~22° below the horizon. */
 export const WEAPON_REST_PITCH = 0.38;
@@ -69,6 +75,88 @@ interface WeaponShared {
   bodyMat: THREE.MeshStandardMaterial;
   barrelMat: THREE.MeshStandardMaterial;
   gripMat: THREE.MeshStandardMaterial;
+}
+
+/* ------------------------------------------------------------------ *-
+ * ART-15 (Task 11): the weapon is GRIPPED, not carried at the chest.
+ * The right arm's hand end is a pure function of (gait phase, aim blend);
+ * the weapon pivot sits at that hand (minus the grip offset), so the grip
+ * under the hand, the muzzle flash and the barrel tip all stay coherent.
+ * `aiming` is a 0..1 blend: 0 = carry (gait swing), 1 = raised two-hand
+ * hold. The renderer's arm meshes use exactly these joint numbers (its
+ * `armL` mesh is the unit's RIGHT arm — mirrored at x = -0.325).
+ * -*/
+/** Right arm joint: shoulder anchor (unit-local, feet at origin, +Z forward),
+ *  base turn, and the 0.52 m box length the renderer hangs from the shoulder. */
+export const RIGHT_ARM = { shoulder: { x: -0.325, y: 1.31, z: 0.14 } as Vec3, yaw: -0.35, length: 0.52 } as const;
+/** Left arm joint (same numbers mirrored). */
+export const LEFT_ARM = { shoulder: { x: 0.325, y: 1.31, z: 0.14 } as Vec3, yaw: 0.35, length: 0.52 } as const;
+/** Two-hand hold pose (applied while the firing window is open). */
+export const AIM = {
+  /** Right arm swings forward so the hand lands on the grip. */
+  rightArmSwing: -1.1,
+  /** Right arm turns slightly across the body so the gun sits centred. */
+  rightArmYaw: 0.2,
+  /** Left arm crosses forward toward the handguard. */
+  leftArmSwing: -1.2,
+  leftArmYaw: -0.75,
+} as const;
+
+/** Pure: the HAND end of an arm whose shoulder sits at `shoulder`, turned by
+ *  `yaw` and swung forward by `swing` (rotation.x, the same convention as
+ *  the renderer's walk swing). Unit: metres, unit-local. */
+export function armHandLocal(shoulder: Vec3, yaw: number, swing: number, length: number): Vec3 {
+  const hy = -length * Math.cos(swing);
+  const hz = -length * Math.sin(swing);
+  return {
+    x: shoulder.x + hz * Math.sin(yaw),
+    y: shoulder.y + hy,
+    z: shoulder.z + hz * Math.cos(yaw),
+  };
+}
+
+/** Pure: RIGHT hand position (unit-local) at gait `phase` with aim blend
+ *  `aiming`. The carry swing matches the renderer's right-side arm mesh
+ *  EXACTLY (that mesh is the one labelled `armL` at x -0.325, driven by
+ *  `gaitJointAngles().leftArm = -sin(phase)`). */
+export function rightHandLocal(phase: number, aiming: number): Vec3 {
+  const swing = -Math.sin(phase) * WALK.armAmpWalk * (1 - aiming) + AIM.rightArmSwing * aiming;
+  const yaw = RIGHT_ARM.yaw * (1 - aiming) + AIM.rightArmYaw * aiming;
+  return armHandLocal(RIGHT_ARM.shoulder, yaw, swing, RIGHT_ARM.length);
+}
+
+/** Pure: LEFT hand position (unit-local) — the support hand (the arm mesh
+ *  labelled `armR` at x +0.325, driven by `gaitJointAngles().rightArm`). */
+export function leftHandLocal(phase: number, aiming: number): Vec3 {
+  const swing = Math.sin(phase) * WALK.armAmpWalk * (1 - aiming) + AIM.leftArmSwing * aiming;
+  const yaw = LEFT_ARM.yaw * (1 - aiming) + AIM.leftArmYaw * aiming;
+  return armHandLocal(LEFT_ARM.shoulder, yaw, swing, LEFT_ARM.length);
+}
+
+/** Local grip point of the weapon mesh (makeWeaponMesh) in the pivot frame. */
+export const WEAPON_GRIP_LOCAL: Vec3 = { x: 0.01, y: -0.115, z: -0.03 };
+
+/** The grip offset rotated into the REST (muzzle-down) pose: the pivot is
+ *  placed relative to the hand through THIS offset, so the grip sits in the
+ *  hand at rest and drifts by only a few cm while the gun pitches up. */
+const _grc = Math.cos(WEAPON_REST_PITCH), _grs = Math.sin(WEAPON_REST_PITCH);
+export const WEAPON_GRIP_DROP: Vec3 = {
+  x: WEAPON_GRIP_LOCAL.x,
+  y: WEAPON_GRIP_LOCAL.y * _grc - WEAPON_GRIP_LOCAL.z * _grs,
+  z: WEAPON_GRIP_LOCAL.y * _grs + WEAPON_GRIP_LOCAL.z * _grc,
+};
+
+/** Pure: weapon PIVOT position (unit-local) that puts the right hand on the
+ *  grip: the hand minus the grip offset in the rest orientation (the raised
+ *  pitch / recoil kick shifts the grip by only a few cm — well inside the
+ *  0.12 m hand/grip test tolerance). */
+export function weaponPivotLocal(phase: number, aiming: number): Vec3 {
+  const hand = rightHandLocal(phase, aiming);
+  return {
+    x: hand.x - WEAPON_GRIP_DROP.x,
+    y: hand.y - WEAPON_GRIP_DROP.y,
+    z: hand.z - WEAPON_GRIP_DROP.z,
+  };
 }
 
 let shared: WeaponShared | null = null;
@@ -127,12 +215,22 @@ export function weaponAimRot(unitYaw: number, aim: Vec3, recoil: number): { yaw:
   return { yaw, pitch };
 }
 
-/** World position of the barrel tip for a unit at `pos` facing `yaw`, aiming
- *  at `aim`, with `recoil` in [0, 1]. At recoil 0 this is EXACTLY the legacy
+/** World position of the barrel tip (muzzle-flash anchor) for a unit at
+ *  `pos` facing `yaw`, with the weapon pivot at LOCAL `pivotLocal`, aiming
+ *  at `aim`, with `recoil` in [0, 1]. Feeding the legacy chest pivot
+ *  ({x: 0, y: WEAPON_PIVOT_Y, z: 0}) with recoil 0 is EXACTLY the legacy
  *  muzzle-flash formula: eye + aim*MUZZLE_OFFSET - (0, MUZZLE_DROP, 0).
  *  Pure math (no three.js state) so both the App (flash spawn) and the
- *  Renderer (probe / view model) share one source of truth. */
-export function weaponMuzzleWorld(pos: Vec3, yaw: number, aim: Vec3, recoil: number): Vec3 {
+ *  Renderer (probe / view model) share one source of truth — and the
+ *  renderer feeds the SAME pivot it used for the 3D mesh, so the flash can
+ *  never drift from the barrel tip on the moving hand. */
+export function weaponMuzzleWorld(
+  pos: Vec3,
+  yaw: number,
+  pivotLocal: Vec3,
+  aim: Vec3,
+  recoil: number,
+): Vec3 {
   const ay = clamp(aim.y, -1, 1);
   const yawW = Math.atan2(aim.x, aim.z);
   const pitch = -Math.asin(ay) - WEAPON_RECOIL_PITCH * recoil; // Rx angle
@@ -143,13 +241,15 @@ export function weaponMuzzleWorld(pos: Vec3, yaw: number, aim: Vec3, recoil: num
   const dx = sy * cp;
   const dy = -Math.sin(pitch);
   const dz = cy * cp;
-  // pivot offset = Ry(yaw) * (0, WEAPON_PIVOT_Y, -RECOIL_TRAVEL*recoil)
-  const pull = -WEAPON_RECOIL_TRAVEL * recoil;
+  // pivot world position = rotY(unitYaw) applied to (pos + pivotLocal)
   const su = Math.sin(yaw);
   const cu = Math.cos(yaw);
+  const px = pos.x + pivotLocal.x * cu + pivotLocal.z * su;
+  const py = pos.y + pivotLocal.y;
+  const pz = pos.z - pivotLocal.x * su + pivotLocal.z * cu;
   return {
-    x: pos.x + pull * su + dx * MUZZLE_OFFSET,
-    y: pos.y + WEAPON_PIVOT_Y + dy * MUZZLE_OFFSET,
-    z: pos.z + pull * cu + dz * MUZZLE_OFFSET,
+    x: px + dx * MUZZLE_OFFSET,
+    y: py + dy * MUZZLE_OFFSET,
+    z: pz + dz * MUZZLE_OFFSET,
   };
 }

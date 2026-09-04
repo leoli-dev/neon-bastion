@@ -23,10 +23,10 @@ import { MAX_BULLETS } from '../game/combat/bullet';
 import { eyeOf } from '../game/combat/hitscan';
 import { sharedViewCanSee } from '../game/ai/aiPerception';
 import { FxPool } from './fxpools';
-import { WALK, gaitPose } from './walkAnim';
+import { WALK, gaitPose, gaitPhase } from './walkAnim';
 import {
-  makeWeaponMesh, weaponAimRot, weaponMuzzleWorld,
-  WEAPON_FIRING_WINDOW, WEAPON_PIVOT_Y, WEAPON_RECOIL_TRAVEL, WEAPON_REST_PITCH,
+  makeWeaponMesh, weaponAimRot, weaponMuzzleWorld, weaponPivotLocal,
+  AIM, WEAPON_FIRING_WINDOW, WEAPON_RECOIL_TRAVEL, WEAPON_REST_PITCH,
 } from './weapon';
 
 // ART-11: first-person VIEW MODEL (the gun in the player's own screen,
@@ -39,9 +39,15 @@ import {
 // The geometry is the SAME shared makeWeaponMesh() as the third-person units
 // (task 5) — one gun model, two renderings.
 const VM_FOV = 38; // narrow lens: the gun reads compact, not wide-angle warped
-const VM_BASE = { x: 0.18, y: -0.17, z: -0.55 }; // grip anchor, bottom-right
-const VM_YAW = Math.PI - 0.35; // barrel points away (camera looks -Z) + right
-const VM_PITCH = -0.35; // muzzle up ~20° (negative x = raised, see weapon.ts)
+// ART-15(2) Task 11: the view model is a recognisable gun silhouette at the
+// bottom-right — about 25–35% of screen HEIGHT, barrel angled up-LEFT toward
+// screen centre (muzzle just below the crosshair height). The previous pose
+// ran from the middle of the screen to the bottom edge as a dark column
+// (~56% of the height) — see the Task-11 E2E probe.
+const VM_BASE = { x: 0.2726, y: -0.12625, z: -0.75 }; // grip anchor, bottom-right
+const VM_YAW = Math.PI + 0.353; // barrel angled toward screen centre (left of -Z)
+const VM_PITCH = -0.29; // muzzle up ~16.5° (negative x = raised, see weapon.ts)
+const VM_SCALE = 1.207; // the gun reads slightly bigger than third-person units
 const VM_BOB_FREQ = 9; // = CONFIG.bobFrequency: same cadence as the sprint bob
 const VM_BOB_AMP_Y = 0.010; // metres — subtle (the camera bob is 0.05)
 const VM_BOB_AMP_X = 0.006;
@@ -164,13 +170,18 @@ interface UnitVisual {
   prevZ: number;
   walkDist: number; // accumulated horizontal distance (drives the phase)
   motion: number;   // eased 0..1 swing gate (1 while moving on the ground)
-  /** ART-10: the weapon's rotation pivot (chest point; the weapon mesh is a
-   *  child). The pivot at (0, WEAPON_PIVOT_Y, 0) is what makes the barrel
-   *  tip coincide with the legacy muzzle-flash formula (see weapon.ts). */
+  /** ART-10 + ART-15: the weapon's rotation pivot (the weapon mesh is a
+   *  child). ART-15: the pivot FOLLOWS the right hand — its local position
+   *  is weaponPivotLocal(gait phase, aim blend) each frame (updateWeaponAnim),
+   *  and the same pivot feeds weaponMuzzleWorld so the barrel tip and the
+   *  muzzle flash stay coherent on the moving hand. */
   weaponPivot: THREE.Group;
   weaponAim: { x: number; y: number; z: number }; // aim dir of the last trigger
   weaponShotAt: number;   // logic time of the last trigger, -1 if none
   weaponRecoil: number;   // 0..1, decays after a trigger
+  /** ART-15: eased 0..1 aim blend (0 = carry, 1 = raised two-hand hold) —
+   *  drives the hand-followed pivot and the arm hold pose. */
+  aimBlend: number;
   /** ART-10: barrel-tip world position at the trigger moment — the muzzle
    *  flash is spawned HERE, so flash and barrel never drift apart. */
   muzzleAtShot: { x: number; y: number; z: number } | null;
@@ -829,6 +840,12 @@ export class Renderer {
     return this.hedgeTexCanvases!;
   }
 
+  /** ART-16: the glass pane tile canvas (E2E probes: mullion/seam checks). */
+  getGlassTextureCanvas(): HTMLCanvasElement {
+    if (!this.glassTex) this.glassTexture();
+    return this.glassTex!.image as HTMLCanvasElement;
+  }
+
   /**
    * ART-12: procedural hedge foliage — a near-white, SEAM-FREE tile that the
    * hedge material multiplies by its (per-id jittered) green. The wall must
@@ -924,15 +941,29 @@ export class Renderer {
   }
 
   private glassTex: THREE.CanvasTexture | null = null;
+  /** ART-16: world-space width of one glass-pane texture tile (m). The pane
+   *  texture is a REPEATING tile (one window pane + its mullion) instead of
+   *  one frame-per-face image, and buildArenaSolids rescales the box UVs to
+   *  this world size — so the mullion keeps a constant world width on every
+   *  face, wide or narrow. (Pre-ART-16 the whole frame texture was clamped
+   *  into each face; on the 2 m maze side faces the dark frame was ~40% of
+   *  the face and read as a near-black slab — the Task-11/ART-16 probe.) */
+  static readonly GLASS_PANE_TILE = 1.6;
 
-  /** ART-12: the shared glass pane texture (built once, deterministic).
+  /** ART-12 + ART-16: the shared glass pane texture (built once, deterministic).
    *  Carries the pane's whole look in RGBA: the interior is EXACTLY the
    *  pre-ART-12 pane (0xa8dce8 at 0.22 alpha) so see-through behaviour is
    *  unchanged (MAP-01 test 8); on top of that it paints the details that
-   *  make it read as glass — a dark frame around every face, a bright
-   *  keyline at the inner frame edge, a soft fresnel-style glow just inside
-   *  the frame, and a few faint diagonal reflection streaks (wrap-repainted
-   *  at the tile offsets so a streak crossing a tile edge does not clip). */
+   *  make it read as glass. ART-16: instead of a full-perimeter frame on
+   *  every face, the tile now carries ONE mullion (top row + left column,
+   *  ≈10% of the pane ≈ 12 cm in world space) — with RepeatWrapping and the
+   *  per-solid world-space UV scaling, adjacent tiles knit into a mullion
+   *  GRID at constant world width, so a 2 m side face shows mostly pane
+   *  interior (transparent) with one or two slim mullions, never a dark
+   *  border slab. A bright keyline + fresnel-style glow sit just inside
+   *  the mullion, and a few faint diagonal reflection streaks are
+   *  wrap-repainted at the tile offsets so a streak crossing a tile edge
+   *  does not clip. */
   private glassTexture(): THREE.CanvasTexture {
     if (this.glassTex) return this.glassTex;
     const S = 256;
@@ -966,19 +997,22 @@ export class Renderer {
         ctx.restore();
       }
     }
-    // Frame around the face: dark border (each box face gets its own frame,
-    // so the whole solid reads as a framed glass structure).
-    const F = 14; // ≈ 5.5% of the face
-    ctx.fillStyle = 'rgba(38,46,56,0.9)';
-    ctx.fillRect(0, 0, S, F);
-    ctx.fillRect(0, S - F, S, F);
-    ctx.fillRect(0, 0, F, S);
-    ctx.fillRect(S - F, 0, F, S);
-    // Bright keyline at the inner frame edge (the pane catching light).
+    // ART-16 mullion: dark band on the tile's TOP row + LEFT column. With
+    // RepeatWrapping the neighbouring tiles complete each mullion, so the
+    // wall reads as a framed GLASS GRID (constant ~12 cm mullions) rather
+    // than a face-bordered slab.
+    const F = 26; // ≈ 10% of the 1.6 m pane ≈ 16 cm in world space
+    ctx.fillStyle = 'rgba(48,58,70,0.92)';
+    ctx.fillRect(0, 0, S, F); // top
+    ctx.fillRect(0, 0, F, S); // left
+    // Bright keyline at the inner mullion edge (the pane catching light).
     ctx.strokeStyle = 'rgba(235,246,250,0.55)';
     ctx.lineWidth = 2;
-    ctx.strokeRect(F + 1, F + 1, S - 2 * F - 2, S - 2 * F - 2);
-    // Fresnel-style edge glow: soft bright band just inside each frame side.
+    ctx.beginPath();
+    ctx.moveTo(F + 1, F + 1); ctx.lineTo(S, F + 1);
+    ctx.moveTo(F + 1, F + 1); ctx.lineTo(F + 1, S);
+    ctx.stroke();
+    // Fresnel-style glow: soft bright band just inside the mullion.
     const glowW = 26;
     const glow = (x0: number, y0: number, x1: number, y1: number, rx: number, ry: number, rw: number, rh: number): void => {
       const g = ctx.createLinearGradient(x0, y0, x1, y1);
@@ -987,12 +1021,11 @@ export class Renderer {
       ctx.fillStyle = g;
       ctx.fillRect(rx, ry, rw, rh);
     };
-    glow(F, F, F, F + glowW, F, F, S - 2 * F, glowW); // top
-    glow(F, S - F - glowW, F, S - F, F, S - F - glowW, S - 2 * F, glowW); // bottom
-    glow(F, F, F + glowW, F, F, F, glowW, S - 2 * F); // left
-    glow(S - F - glowW, F, S - F, F, S - F - glowW, F, glowW, S - 2 * F); // right
+    glow(0, F, 0, F + glowW, 0, F, S, glowW); // below the top mullion
+    glow(F, 0, F + glowW, 0, F, 0, glowW, S); // right of the left mullion
     const tex = new THREE.CanvasTexture(cv);
     tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping; // ART-16: the pane REPEATS
     this.glassTex = tex;
     return tex;
   }
@@ -1027,6 +1060,10 @@ export class Renderer {
       // ART-12: hedge foliage repeats every 3 m (its wall height), not once
       // per face — rescale the texture coordinates (shape/collision intact).
       if (s.material === 'hedge') this.scaleBoxUVs(geo, s.sx, h, s.sz, 3);
+      // ART-16: glass panes repeat every GLASS_PANE_TILE metres in world
+      // space (box projection) — the mullion width is constant in metres on
+      // every face, so narrow side faces keep their transparent interior.
+      else if (s.material === 'glass') this.scaleBoxUVs(geo, s.sx, h, s.sz, Renderer.GLASS_PANE_TILE);
       const mesh = new THREE.Mesh(geo, this.materialFor(s));
       mesh.position.set(s.x, s.bottom + h / 2, s.z);
       this.arenaGroup.add(mesh);
@@ -1164,11 +1201,13 @@ export class Renderer {
       visor.position.set(0, CONFIG.headCenterY, CONFIG.headRadius - 0.02);
       add(visor, 'body');
 
-      // ART-10: the hand weapon. A rotation pivot at chest height carries the
-      // shared weapon geometry (makeWeaponMesh — reused by the later first-
-      // person view model). Rest pose: muzzle drooped ~22° below the horizon;
-      // on a shot event the renderer snaps it to the aim direction with a
-      // short recoil (see updateWeaponAnim).
+      // ART-10 + ART-15: the hand weapon. A rotation pivot CARRIES the
+      // shared weapon geometry (makeWeaponMesh — reused by the first-person
+      // view model). ART-15: the pivot starts at the RIGHT HAND's carry
+      // position (weaponPivotLocal), not a fixed chest point — it follows
+      // the hand every frame (updateWeaponAnim). Rest pose: muzzle drooped
+      // ~22° below the horizon; on a shot event the renderer snaps it to
+      // the aim direction with a short recoil (see updateWeaponAnim).
       // EXPLICIT ART-08 EXCEPTION: the weapon meshes are deliberately NOT
       // added to `parts` (and thus not to the shared material states and NOT
       // to unitVisualBounds) because the weapon is NOT part of the hitbox —
@@ -1176,7 +1215,8 @@ export class Renderer {
       // must measure the character, not the held prop.
       const weaponPivot = new THREE.Group();
       weaponPivot.name = 'weaponPivot';
-      weaponPivot.position.set(0, WEAPON_PIVOT_Y, 0);
+      const wp0 = weaponPivotLocal(0, 0); // carry phase 0 (feet together)
+      weaponPivot.position.set(wp0.x, wp0.y, wp0.z);
       weaponPivot.rotation.order = 'YXZ'; // yaw about Y, then pitch about the
       weaponPivot.rotation.x = WEAPON_REST_PITCH; // local horizontal axis
       weaponPivot.add(makeWeaponMesh().group);
@@ -1202,6 +1242,7 @@ export class Renderer {
         weaponAim: { x: Math.sin(u.yaw), y: 0, z: Math.cos(u.yaw) },
         weaponShotAt: -1,
         weaponRecoil: 0,
+        aimBlend: 0,
         muzzleAtShot: null,
       });
     }
@@ -1594,11 +1635,14 @@ export class Renderer {
   }
 
   /**
-   * ART-10: consume the 'shot' event for a shooter: raise that unit's weapon
-   * SNAPPED to the shot's aim direction (spread included) with full recoil,
-   * and record the exact barrel-tip world position (`muzzleAtShot`) from the
-   * shared muzzle math — the App spawns the muzzle flash there, so the flash
-   * and the visible barrel are the same point by construction. Pure render
+   * ART-10 + ART-15: consume the 'shot' event for a shooter: raise that
+   * unit's weapon SNAPPED to the shot's aim direction (spread included)
+   * with full recoil, and record the exact barrel-tip world position
+   * (`muzzleAtShot`) from the shared muzzle math — the App spawns the muzzle
+   * flash there, so the flash and the visible barrel are the same point by
+   * construction. ART-15: the pivot is also SNAPPED to the raised right hand
+   * (aim blend 1) with the full recoil pull-back — the muzzle math uses
+   * exactly that pivot, so flash, barrel and hand stay coherent. Pure render
    * state (never writes to Unit/AIState).
    */
   triggerShot(u: Unit, aim: Vec3, now: number): void {
@@ -1607,11 +1651,14 @@ export class Renderer {
     v.weaponAim = { x: aim.x, y: aim.y, z: aim.z };
     v.weaponShotAt = now;
     v.weaponRecoil = 1;
+    v.aimBlend = 1;
+    const hand = weaponPivotLocal(gaitPhase(v.walkDist, WALK.strideWalk), 1);
+    const pivotLocal = { x: hand.x, y: hand.y, z: hand.z - WEAPON_RECOIL_TRAVEL };
     const rot = weaponAimRot(u.yaw, aim, 1);
     v.weaponPivot.rotation.y = rot.yaw;
     v.weaponPivot.rotation.x = rot.pitch;
-    v.weaponPivot.position.z = -WEAPON_RECOIL_TRAVEL;
-    v.muzzleAtShot = weaponMuzzleWorld(u.pos, u.yaw, aim, 1);
+    v.weaponPivot.position.set(pivotLocal.x, pivotLocal.y, pivotLocal.z);
+    v.muzzleAtShot = weaponMuzzleWorld(u.pos, u.yaw, pivotLocal, aim, 1);
   }
 
   /** ART-10: the shooter's recorded barrel-tip position at the trigger
@@ -1622,14 +1669,16 @@ export class Renderer {
   }
 
   /**
-   * ART-10: advance one unit's weapon pose by one frame.
+   * ART-10 + ART-15: advance one unit's weapon pose by one frame.
    *
    * While inside the shot-cooldown window after a trigger the gun stays
    * raised at the shot's aim direction (with the decaying recoil kick —
    * barrel up + pulled back, snapping home); outside it the gun relaxes
-   * to the muzzle-down rest pose. The right arm (local -X side; the mesh the
-   * builder labelled `armL` sits at x -0.325) eases forward to hold the gun
-   * while raised. Pure presentation — nothing is written to Unit/AIState.
+   * to the muzzle-down rest pose. ART-15: the pivot POSITION follows the
+   * right hand — weaponPivotLocal(gait phase, aim blend) each frame — and
+   * both arms ease into the two-hand hold while raised (right hand on the
+   * grip, left hand crossing to the handguard). Pure presentation —
+   * nothing is written to Unit/AIState.
    */
   private updateWeaponAnim(u: Unit, v: UnitVisual, now: number, dt: number): void {
     const wp = v.weaponPivot;
@@ -1650,14 +1699,24 @@ export class Renderer {
     }
     wp.rotation.y += (ty - wp.rotation.y) * k;
     wp.rotation.x += (tx - wp.rotation.x) * k;
-    const tz = -WEAPON_RECOIL_TRAVEL * v.weaponRecoil;
-    wp.position.z += (tz - wp.position.z) * k;
 
-    // Hold pose: the right-side arm (x -0.325, labelled armL by the builder)
-    // eases forward to the gun while raised; the walk cycle re-takes over
-    // (its own lerp) as soon as the pose relaxes.
+    // ART-15: the pivot FOLLOWS the right hand — gait phase + aim blend
+    // drive its local position (plus the decaying recoil pull-back).
+    v.aimBlend += ((firing ? 1 : 0) - v.aimBlend) * k;
+    const hand = weaponPivotLocal(gaitPhase(v.walkDist, WALK.strideWalk), v.aimBlend);
+    wp.position.x += (hand.x - wp.position.x) * k;
+    wp.position.y += (hand.y - wp.position.y) * k;
+    wp.position.z += (hand.z - WEAPON_RECOIL_TRAVEL * v.weaponRecoil - wp.position.z) * k;
+
+    // Two-hand hold: the right-side arm (x -0.325, labelled armL by the
+    // builder) eases onto the grip and the left arm crosses to the
+    // handguard while raised; the walk cycle re-takes over (its own lerp)
+    // as soon as the pose relaxes.
     if (firing) {
-      v.armL.rotation.x += (-1.1 - v.armL.rotation.x) * k;
+      v.armL.rotation.x += (AIM.rightArmSwing - v.armL.rotation.x) * k;
+      v.armL.rotation.y += (AIM.rightArmYaw - v.armL.rotation.y) * k;
+      v.armR.rotation.x += (AIM.leftArmSwing - v.armR.rotation.x) * k;
+      v.armR.rotation.y += (AIM.leftArmYaw - v.armR.rotation.y) * k;
     }
   }
 
@@ -1707,6 +1766,7 @@ export class Renderer {
     this.vmCamera = new THREE.PerspectiveCamera(VM_FOV, this.camera.aspect, 0.05, 8);
     this.vmPivot = new THREE.Group(); // recoil transform
     this.vmPivot.rotation.order = 'YXZ';
+    this.vmPivot.scale.setScalar(VM_SCALE); // ART-15(2): recognisable gun size
     this.vmPivot.add(makeWeaponMesh().group); // SHARED geometry with the units
     this.vmRoot = new THREE.Group(); // sway/tuck transform
     this.vmRoot.add(this.vmPivot);
