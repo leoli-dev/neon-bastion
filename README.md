@@ -1,6 +1,18 @@
 # Neon Bastion
 
+![Neon Bastion gameplay: a first-person view across the sand arena, a glass structure ahead, an enemy just eliminated, HUD showing score, health and the shot cooldown](docs/hero.png)
+
+**▶ Play it: <https://leoli-dev.github.io/neon-bastion/>** — desktop browser, click **Deploy**, mouse to aim.
+
 Neon Bastion is a self-contained, browser-based 4v4 arena FPS built with TypeScript, Vite, and Three.js. One human player and three AI teammates face four AI opponents in a symmetric procedural arena. There is no backend, CDN, external model, or downloaded game asset: gameplay, rendering, AI, map, and Web Audio are all local.
+
+> **How this repository was written.** Every line of application code and every test in this
+> repository was written by **Qwen3.8-27B-8bit**, an open-weights model running locally on a
+> laptop through `mlx-dspark` with DFlash2 speculative decoding, driving the `pi` CLI coding
+> agent. A human played the game and set the requirements; a reviewer decomposed those into
+> tasks and verified each commit. The model did the implementation. **[REPORT.md](REPORT.md)**
+> is the full write-up: what it did well, where it failed, every problem hit along the way, and
+> what the same token volume would have cost on a commercial API.
 
 ## Quick start
 
@@ -55,6 +67,8 @@ tests/
   unit/              Simulation and rendering-unit tests
   e2e/               Playwright browser tests
 screenshots/         Visual evidence emitted by the E2E suite
+docs/hero.png        Screenshot used at the top of this file
+REPORT.md            How this repository was written, and what it cost
 ```
 
 ## Quality checks
