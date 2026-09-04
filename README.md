@@ -1,229 +1,76 @@
-# Neon Bastion — 4v4 Neon Arena FPS
+# Neon Bastion
 
-A complete, **self-contained, no-backend, no-CDN** browser FPS. One human (Vega) + 3
-AI teammates vs 4 AI opponents on a symmetric neon arena. Every byte is local: the
-engine, the map, the AI, the audio (synthesized WebAudio) and the text (a system
-monospace stack — **no external font request**) all ship from `src/`.
+Neon Bastion is a self-contained, browser-based 4v4 arena FPS built with TypeScript, Vite, and Three.js. One human player and three AI teammates face four AI opponents in a symmetric procedural arena. There is no backend, CDN, external model, or downloaded game asset: gameplay, rendering, AI, map, and Web Audio are all local.
 
-Build with Vite, run with a static file server, test with Vitest (unit) and Playwright
-(E2E, SwiftShader WebGL in headless Chromium).
+## Quick start
 
-## Status
+Requires Node.js 20 or newer.
 
-Playable and tested. The fixed-tick sim, navmesh AI, and rendering are implemented and
-covered by 38 unit tests and 6 Playwright E2E scenarios. Two rounds of design review
-blocker and P2 items have been addressed — see [What changed in this pass](#what-changed-in-this-pass).
+```bash
+npm install
+npm run dev
+```
+
+Open the URL Vite prints (normally `http://localhost:5173`). For a production build:
+
+```bash
+npm run build
+npm run preview
+```
 
 ## Controls
 
-The table below is 1:1 with `applyKey()` in `src/app.ts` — every row is a real
-binding, and every real binding is listed.
-
 | Input | Action |
-|---|---|
-| `WASD` / arrows | Move |
-| Mouse | Aim (pointer-locked) |
-| Left click | Fire (semi-auto, one shot per second — the fire-rate cooldown is the only limit) |
-| `Shift` | Sprint (1.56× speed, subtle FOV push + head bob) |
+| --- | --- |
+| `WASD` or arrow keys | Move |
+| Mouse | Aim after pointer lock |
+| Left click | Fire pulse rifle |
+| `Shift` | Sprint |
 | `Space` | Jump |
-| `Q` / `E` | Spectate previous / next ally (after you die) |
-| `Esc` | Release the mouse / open the pause screen |
-| `F2` | Director mode (score-only overlay, hides all match chrome) |
-| `F3` / `` ` `` | Toggle the debug panel (units, AI states, perf) |
-| `M` | Toggle BGM mute (the synthesized background loop; SFX are never muted) |
+| `Q` / `E` | Previous / next ally while spectating |
+| `Esc` | Release pointer lock and pause |
+| `F2` | Toggle director mode |
+| `F3` or `` ` `` | Toggle debug panel |
+| `M` | Toggle background music |
 
-Not yet implemented (honest list): crouch, melee, weapon switching, Tab leaderboard
-hold, `P` pause.
+Click **Deploy** to begin; it also requests the pointer lock required for mouse aiming.
 
-Deploy / resume / restart are on-screen buttons (the deploy button also requests pointer
-lock, which the browser requires a user gesture for).
+## Features
 
-## What's implemented
+- Fixed 60 Hz deterministic match simulation, seeded RNG, hitscan combat, scorekeeping, and team-elimination rounds.
+- Eight-unit match: Vega plus three AI teammates against four opponents. AI uses a navmesh, line-of-sight/hearing, pathfinding, combat positioning, and spectating handoff.
+- Three.js arena with procedural sky, terrain, glass and hedge wall materials, unit animation, third- and first-person weapons, tracers, muzzle flashes, sparks, minimap, and HUD feedback.
+- Synthesized Web Audio effects and a 150 BPM combat music loop; no audio assets are fetched.
+- Accessibility and resilience: `prefers-reduced-motion` support and a live 2D fallback when WebGL is unavailable (or with `?nogl=1`).
 
-- **Gameplay** — hitscan pulse rifle (body 20 / head 50, i.e. headshot ×2.5), 8
-  units, team-elimination win, and a results screen with a per-unit board sorted
-  by score. There are no magazines, reserve ammo or reloads — the shared
-  1-shot/second fire-rate throttle is the only firing limit, so nobody can run
-  dry.
-- **Deterministic sim** — a fixed 60 Hz tick. Same seed ⇒ same input stream ⇒ same
-  match. Damage and score are pure functions of the sim, so the leaderboard is exact.
-- **Navmesh AI** — a 29-node graph (A\*) with line-of-sight routing. States:
-  `idle → patrol → alert → combat → cautious` (and a final `advancing` last-man stance).
-  `alert` means the unit heard a shot/footstep and walks a navmesh route to investigate;
-  combat uses a waypoint approach, strafing, burst fire with inaccuracy, and an alert
-  timer so a unit that loses sight de-escalates instead of chasing forever.
-- **Spectating** — on death you spectate your living allies (Q / E cycles), then a free
-  orbit camera once your team is wiped.
-- **Renderer** — three.js, a desaturated "night facility" environment (cool grey walls,
-  warm sodium lamps, one-lane lighting) so the only saturated colours are the team
-  identity (cyan vs magenta) and hit feedback (gold). Muzzle flash, additive tracers
-  (fired from the muzzle, not the eye, so your own fire is visible) and impact sparks
-  (unit hits AND wall hits), a live blueprint minimap (units as filled/hollow dots +
-  team spawn wedges), fog, and ACES filmic tonemapping with a brightness floor
-  (ambient + 6 sodium lamps) so the scene stays legible.
-- **Audio** — fully synthesized (fire, impact, headshot, footsteps, UI, and a fast
-  150 BPM A/B combat BGM with a synthesized kick/snare/hat skeleton — `M` toggles
-  the loop, SFX always stay louder); no assets.
-- **No backend** — the whole match runs client-side; "restart" just reseeds the RNG.
-- **Favicon (UI-03)** — the page declares `link[rel=icon]`, `apple-touch-icon` and
-  `theme-color`, all inline in `index.html`: the icon is an SVG data URI (a blue-team
-  `#18e0ff` crosshair ticks + red-team `#ff3d63` core on the dark background — simple
-  enough to read at 16×16), so there are no external `.ico`/`.png` assets and nothing
-  for the build to rewrite or 404. An E2E test asserts the icon href is non-empty and
-  resolvable (scheme + payload length for the inline URI), and that `theme-color` / `apple-touch-icon` are present.
+## Project layout
 
-## What changed in this pass
-
-Addressing a design/code review:
-
-- **`alert` AI state** — previously a unit that heard a shot but saw no enemy would
-  freeze in `cautious`/`patrol` and never close in. It now walks a navmesh route to the
-  sound, then re-evaluates. A regression test runs full matches on 3 seeds and asserts
-  they always terminate (no stalemate).
-- **Hit feedback** — a hitmarker (X ticks + headshot flag), a floating damage number at
-  the hit point, and a brief gold hit-flash on the victim, all driven by real sim events
-  (not a cosmetic fake).
-- **Spectator before end** — the spectator target is recomputed when a player dies,
-  before the match-end check, so dying players are never left on a stale camera.
-- **No-WebGL fallback** — if WebGL is unavailable (or `?nogl=1`), the page shows a
-  legible 2D status + control list and still runs the deterministic match headlessly.
-  It never renders a blank screen.
-- **Results overlap fix** — the results screen now hides the in-match HUD chrome
-  (score bar, leaderboard, minimap, crosshair) so nothing overlaps.
-- **Director mode (`F2`)** and a **debug panel (`F3` / `` ` ``)** for observing AI and
-  perf without the match UI.
-- **Reduced motion** — honours `prefers-reduced-motion` (freezes the spectator orbit,
-  shortens tracers, halves impact sparks) with CSS + JS hooks.
-- **E2E coverage** — grew from 3 smoke checks to 6 scenarios covering deploy+move+wall,
-  body/head scoring + hitmarker, death→spectate→free-camera, win→freeze→results→restart,
-  seeded-AI-termination + invariants, and the no-WebGL fallback.
-
-## What changed after the round-2 review (manual-play fixes)
-
-A human play session found issues the automated suite structurally could not (see the
-methodology note in the review). All fixed, each with a regression test:
-
-- **Overlay text was unreadable (P1)** — the start/pause/results screen was attached
-  to `#app` instead of `.nb-root`, so it inherited none of the design tokens and
-  rendered as pure black Times on a near-black background. One-line fix: the screen
-  is now a child of `.nb-root`. The E2E now asserts the *computed* colour and
-  font-family of the results title, so black-on-black fails the suite.
-- **A/D strafe was inverted (P1)** — screen-right is `f × up = (-cos θ, sin θ)`;
-  the code had its negation, so A strafed right and D strafed left. Fixed in
-  `match.ts` + a pure-logic unit test (`tests/unit/movement.test.ts`) asserting
-  D moves to screen-right at four headings, plus a D-strafe check in the E2E.
-- **Combat feedback was invisible (P1)** — tracers now start at the muzzle
-  (a line from the FPV eye projects to a screen-centre dot and can't be seen),
-  tracer life doubled (0.09s → 0.18s via `CONFIG.tracerLife`), a real muzzle flash
-  was implemented (`CONFIG.muzzleLife` was a dead constant), and wall hits now
-  spark too (previously only unit hits did).
-- **Scene was too dark in real play (P2)** — exposure 1.15 → 1.5, walls
-  `#1A1D22` → `#23272E`, a new `AmbientLight` brightness floor, and 6 sodium lamps
-  at 220 intensity (was 4 at 150).
-- **README documented 6 controls that don't exist (P1)** — the controls table is
-  now 1:1 with `applyKey()` (Space=jump, Q/E=spectate, no crouch/melee/weapons/
-  Tab/P/M), and the "What's implemented" section no longer claims melee, crouch,
-  first-to-30, a 90 s clock, a countdown, or a *sortable* board.
-- **Sprint is now perceptible** — smooth FOV push (78° → 85°) and a subtle head bob
-  while sprinting (the sim already had a 1.56× speed; nothing signalled it).
-- **E2E "arena rendered" assertion hardened (P2)** — the old "screenshot bytes > 20 KB"
-  proxy was defeated by the rich HUD (a page whose 3D scene is all-black still
-  compresses large). The suite now reads the WebGL canvas pixels directly
-  (`preserveDrawingBuffer` makes the in-page read reliable) and asserts a minimum
-  fraction of non-background pixels, from a camera position facing the central
-  platform.
-
-## Architecture
-
-```
+```text
 src/
-  app.ts            orchestrates: boot, input, rAF render, fixed-tick loop, screens
-  render/
-    renderer.ts     three.js scene: arena, units, tracers/sparks, minimap, camera
-    hud.ts          DOM overlay: score, crosshair, hitmarker, damage, debug, results
-  game/
-    constants.ts    all tunables in one place
-    types.ts        shared types
-    rng.ts          deterministic seeded RNG (mulberry32) + hashing
-    match.ts        Match: owns units/weapon/spectator, the fixed tick, events
-    units/units.ts  unit factory + body-AABB / head-sphere hitboxes
-    combat/weapon.ts  fire-rate cooldown, spread
-    combat/hitscan.ts ray vs AABB (map) + sphere (head/torso), nearest hit wins
-    map/mapData.ts  procedural layout (data-driven, no image assets)
-    map/geometry.ts  raycasts, ground height, walkability checks
-    map/navmesh.ts  nav graph (LOS-derived links) + A* pathfinding
-    map/movement.ts  gravity, wall collision, ground follow
-    ai/             perception (LOS/hearing), controller (state machine),
-                    spectator target resolution
-    audio.ts        synthesized SFX + ambience
-  testHooks.ts      window.__teamArenaTest (E2E + manual inspection API)
+  app.ts             Application lifecycle, input, fixed-tick loop, and screens
+  game/              Match simulation, AI, combat, map, movement, audio, and types
+  render/            Three.js scene, HUD, effects, animation, and weapons
+  testHooks.ts       Deterministic browser API used by E2E tests
+tests/
+  unit/              Simulation and rendering-unit tests
+  e2e/               Playwright browser tests
+screenshots/         Visual evidence emitted by the E2E suite
 ```
 
-## Testing
+## Quality checks
 
-**Unit (`npx vitest run`)** — 38 tests:
-- geometry (solids, navmesh links)
-- hitscan (AABB + head/torso spheres, nearest-hit)
-- pathing (A\* finds connected routes, none when disconnected)
-- movement (**strafe direction regression**: D moves to screen-right at four
-  headings, A is its mirror, strafing is pure lateral)
-- match (damage/hitbox head-vs-body scoring, **the scoring invariant**
-  `totalScore === hitScore + 3×kills` across every unit)
-- ai (patrol→combat escalation, de-escalation, alert, **full-match termination on
-  3 seeds** with the invariant + no-negative-HP + a winner asserted)
-
-**E2E (`npx playwright test`)** — 6 scenarios in real headless Chromium (SwiftShader
-WebGL, `?nogl=1` for the fallback). They drive the game through the public test hooks
-(`window.__teamArenaTest`) so they are deterministic — no image matching, no flaky
-AI-wins. See [test hooks](#test-hooks).
-
-```
-npm run build && npm test          # typecheck, unit, e2e
-npm run test:unit                  # vitest only
-npm run test:e2e                   # playwright only
-npm run test:all                   # unit + e2e
+```bash
+npm run typecheck   # TypeScript only
+npm test            # Vitest unit suite
+npm run test:e2e    # Playwright browser suite
+npm run test:all    # Both suites
+npm run build       # Typecheck and production bundle
 ```
 
-## Test hooks
+At the current revision, the suite contains 149 unit tests and 26 Playwright scenarios. The E2E suite intentionally regenerates the tracked screenshots in `screenshots/`; run it when you want refreshed visual evidence, and include those updates in a feature commit only when the rendered result intentionally changed.
 
-`window.__teamArenaTest` exposes a deterministic API used by the E2E suite (and handy
-for manual inspection in the DevTools console):
+## Notes
 
-```js
-__teamArenaTest.seed(7)            // pin the RNG seed (returns current if no arg)
-__teamArenaTest.start()            // deploy
-__teamArenaTest.state()            // full match snapshot (units, scores, state, spectator)
-__teamArenaTest.shoot({x,y,z})     // fire with an explicit aim vector (deterministic hit)
-__teamArenaTest.applyDamage(victimId, amount, causeId?)
-__teamArenaTest.teleport(unitId, x, z)
-__teamArenaTest.fastForward(seconds)  // run the fixed-tick loop synchronously
-__teamArenaTest.forceSpectate()    // kill the player, enter spectator
-__teamArenaTest.playAgain(seed?)   // restart (optionally reseed)
-__teamArenaTest.repaintHud()       // force the (throttled) leaderboard to repaint
-```
-
-## How to run
-
-```
-npm install
-npm run build        # typecheck + vite build -> dist/
-npm run preview      # static server on :4173, then open http://localhost:4173
-```
-
-`npm run dev` serves the Vite dev build on `:5173` for iteration.
-
-## Known limitations
-
-- **Headless pointer lock** — headless Chromium does not grant pointer lock even on a
-  real click gesture. The game *requests* it (the E2E asserts the request fires); on a
-  real browser the lock is granted and the mouse aims normally. The E2E drives aim via
-  `__teamArenaTest.mouseTurn()` instead, which is what matters for the sim.
-- **Headless rAF is throttled** — in headless Chromium `requestAnimationFrame` fires at
-  a few Hz, so the E2E suite advances the sim deterministically via
-  `fastForward()`/`shoot()` (synchronous) rather than relying on the render loop, and
-  polls for a real presented frame when it checks the canvas is not blank.
-- **Bundle size** — three.js is large, so the single production chunk is ~580 kB
-  (~150 kB gzip). That is expected for a 3D game and Vite warns about it; it is not
-  split because the renderer is needed immediately on load.
-- **AI is competent, not competitive** — the AI fights and matches terminate, but it is
-  tuned for "a fair, watchable fight," not for beating a skilled human.
+- Headless Chromium generally declines pointer lock. The browser suite verifies that it is requested and uses deterministic test hooks for aim and simulation control.
+- The production JavaScript bundle is about 636 kB before gzip (about 169 kB gzip), principally because Three.js is loaded with the renderer.
+- The AI is designed for clear, fair matches rather than competitive play against an expert human.

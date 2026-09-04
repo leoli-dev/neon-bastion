@@ -7,6 +7,13 @@ dist/
 # Test artifacts
 test-results/
 playwright-report/
+coverage/
+
+# Local configuration and logs
+.env
+.env.*
+!.env.example
+*.log
 
 # Misc
 .DS_Store
