@@ -37,7 +37,7 @@ Click **Deploy** to begin; it also requests the pointer lock required for mouse 
 
 ## Features
 
-- Fixed 60 Hz deterministic match simulation, seeded RNG, hitscan combat, scorekeeping, and team-elimination rounds.
+- Fixed 60 Hz deterministic match simulation, seeded RNG, dodgeable ballistic projectiles (60 u/s, so a shot takes 0.17-0.5 s to cross a typical engagement), scorekeeping, and team-elimination rounds.
 - Eight-unit match: Vega plus three AI teammates against four opponents. AI uses a navmesh, line-of-sight/hearing, pathfinding, combat positioning, and spectating handoff.
 - Three.js arena with procedural sky, terrain, glass and hedge wall materials, unit animation, third- and first-person weapons, tracers, muzzle flashes, sparks, minimap, and HUD feedback.
 - Synthesized Web Audio effects and a 150 BPM combat music loop; no audio assets are fetched.
